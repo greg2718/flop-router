@@ -31,6 +31,12 @@ DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE = Path("fixtures/evidence_consistency.jsonl
 DEFAULT_ROUTER_STATE_DIR = Path.home() / ".flop_agents" / "router"
 DEFAULT_DECISION_DIR = DEFAULT_ROUTER_STATE_DIR / "decisions"
 DEFAULT_TECHNOCORE_BASE_URL = "https://technocore.chat"
+ROUTER_VERSION = "0.1.2"
+TECHNOCORE_USER_AGENT = f"flop-router/{ROUTER_VERSION} (+https://github.com/greg2718/flop-router)"
+READ_MAX_ATTEMPTS = 3
+READ_BACKOFF_SECONDS = (0.5, 1.0)
+READ_RETRY_STATUS_CODES = {408, 500, 502, 503, 504}
+MAX_RETRY_AFTER_SECONDS = 5.0
 REPORTS_DIR = Path("reports")
 DID_RE = re.compile(r"^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]+$")
 TECHNOCORE_NONCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
@@ -799,6 +805,7 @@ class TechnocoreClient:
     def __init__(self, base_url: str = DEFAULT_TECHNOCORE_BASE_URL):
         self.base_url = base_url.rstrip("/")
         self.network_writes = 0
+        self.last_read_diagnostics = {"attempts": 0, "transient_retries": 0, "final_status": None}
 
     def _url(self, path: str, params: dict[str, str] | None = None) -> str:
         url = f"{self.base_url}{path}"
@@ -807,7 +814,59 @@ class TechnocoreClient:
         return url
 
     def read_text(self, path: str, params: dict[str, str] | None = None) -> tuple[int, str]:
-        request = urllib.request.Request(self._url(path, params), method="GET")
+        attempts = 0
+        retries = 0
+        retry_after_used = False
+        while attempts < READ_MAX_ATTEMPTS:
+            attempts += 1
+            request = urllib.request.Request(
+                self._url(path, params),
+                method="GET",
+                headers={"User-Agent": TECHNOCORE_USER_AGENT, "Accept": "text/plain, application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    status = int(response.status)
+                    body = response.read().decode("utf-8", errors="replace")
+                self.last_read_diagnostics = {"attempts": attempts, "transient_retries": retries, "final_status": status}
+                return status, body
+            except urllib.error.HTTPError as exc:
+                status = int(exc.code)
+                body = exc.read().decode("utf-8", errors="replace")
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                delay = None
+                if status == 429 and not retry_after_used and retry_after is not None:
+                    try:
+                        candidate = float(retry_after)
+                        if 0 <= candidate <= MAX_RETRY_AFTER_SECONDS:
+                            delay = candidate
+                    except (TypeError, ValueError):
+                        pass
+                should_retry = status in READ_RETRY_STATUS_CODES or delay is not None
+                if should_retry and attempts < READ_MAX_ATTEMPTS:
+                    retry_after_used = retry_after_used or delay is not None
+                    retries += 1
+                    time.sleep(delay if delay is not None else READ_BACKOFF_SECONDS[retries - 1])
+                    continue
+                self.last_read_diagnostics = {"attempts": attempts, "transient_retries": retries, "final_status": status}
+                return status, body
+            except OSError as exc:
+                if attempts < READ_MAX_ATTEMPTS:
+                    retries += 1
+                    time.sleep(READ_BACKOFF_SECONDS[retries - 1])
+                    continue
+                self.last_read_diagnostics = {"attempts": attempts, "transient_retries": retries, "final_status": 0}
+                return 0, f"READ_FAILED: {exc}"
+        self.last_read_diagnostics = {"attempts": attempts, "transient_retries": retries, "final_status": 0}
+        return 0, "READ_FAILED: retry limit exhausted"
+
+    def write_text(self, path: str, params: dict[str, str] | None = None) -> tuple[int, str]:
+        self.network_writes += 1
+        request = urllib.request.Request(
+            self._url(path, params),
+            method="GET",
+            headers={"User-Agent": TECHNOCORE_USER_AGENT, "Accept": "text/plain, application/json"},
+        )
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 return int(response.status), response.read().decode("utf-8", errors="replace")
@@ -815,10 +874,6 @@ class TechnocoreClient:
             return int(exc.code), exc.read().decode("utf-8", errors="replace")
         except OSError as exc:
             return 0, f"READ_FAILED: {exc}"
-
-    def write_text(self, path: str, params: dict[str, str] | None = None) -> tuple[int, str]:
-        self.network_writes += 1
-        return self.read_text(path, params)
 
 
 def quote_path_component(value: str) -> str:
@@ -938,6 +993,9 @@ def technocore_status(client: TechnocoreClient | None = None, state_dir: Path = 
             check = interpret_room_owner_response(status, body)
         else:
             check = {"http_status": status, "body_preview": body[:240]}
+        diagnostics = getattr(client, "last_read_diagnostics", {})
+        check["attempts"] = diagnostics.get("attempts", 1)
+        check["transient_retries"] = diagnostics.get("transient_retries", 0)
         checks[name] = check
     return {
         "router_did": router_did,
@@ -1181,6 +1239,8 @@ def print_technocore_status(status: dict) -> None:
     print(f"mailbox: {status['mailbox']}")
     for name, check in status["checks"].items():
         print(f"{name}_status: {check['http_status']}")
+        print(f"{name}_attempts: {check.get('attempts', 1)}")
+        print(f"{name}_transient_retries: {check.get('transient_retries', 0)}")
         if "owner_did" in check:
             print(f"{name}_did: {check['owner_did']}")
             print(f"{name}_state: {check['owner_state']}")
@@ -2003,6 +2063,11 @@ def create_signing_verification_request(
     created_at: str | None = None,
     operator_group: str = LOCAL_OPERATOR_GROUP,
     response_destination: str = "local://scout/bench-result",
+    routing_decision_id: str | None = None,
+    routing_decision_hash: str | None = None,
+    linked_task_hash: str | None = None,
+    verification_mode: str = "OBJECTIVE_BENCH",
+    same_operator_disclosure: dict | None = None,
 ) -> dict:
     request = {
         "schema_version": "flop-verification-request/v1",
@@ -2012,7 +2077,7 @@ def create_signing_verification_request(
         "target_agent_did": target_agent_did,
         "task_type": "technocore.synthetic_signing_payload_order",
         "required_capabilities": ["technocore.signed_post", "software.debugging"],
-        "verification_mode": "OBJECTIVE_BENCH",
+        "verification_mode": verification_mode,
         "specimen": {
             "room": "technocore",
             "nonce": "123",
@@ -2030,8 +2095,45 @@ def create_signing_verification_request(
         "response_destination": response_destination,
         "operator_group": operator_group,
     }
+    if routing_decision_id is not None:
+        request.update({
+            "routing_decision_id": routing_decision_id,
+            "routing_decision_hash": routing_decision_hash,
+            "task_hash": linked_task_hash,
+            "same_operator_disclosure": same_operator_disclosure or {},
+            "same_operator": True,
+            "independent_reputation": False,
+        })
     request["request_id"] = request_id_for_verification_request(request)
     request["artifact_hash"] = canonical_json_hash({key: value for key, value in request.items() if key != "artifact_hash"})
+    return request
+
+
+def create_verification_request_from_decision(decision_path: Path, output: Path) -> dict:
+    decision = load_decision_artifact(decision_path)
+    verification = verify_routing_decision(decision)
+    if verification.get("authenticity") != "VERIFIED_OFFLINE" or not verification.get("valid"):
+        raise SystemExit("Routing decision must have AUTHENTICITY: VERIFIED_OFFLINE.")
+    verification_plan = decision.get("verification_plan")
+    if not isinstance(verification_plan, dict) or verification_plan.get("required") is not True:
+        raise SystemExit("Routing decision verification_plan.required must be true.")
+    selected_agents = decision.get("selected_agents") or []
+    if not selected_agents:
+        raise SystemExit("Routing decision has no selected agent for verification.")
+    disclosure = decision.get("same_operator_disclosures")
+    if not isinstance(disclosure, dict):
+        raise SystemExit("Routing decision same_operator_disclosures are missing.")
+    request = create_signing_verification_request(
+        requester_did=str(decision["router_did"]),
+        target_agent_did=str(selected_agents[0]),
+        operator_group=str(disclosure.get("operator_group") or ROUTER_OPERATOR_GROUP),
+        verification_mode=str(verification_plan.get("mode") or "OBJECTIVE_BENCH"),
+        routing_decision_id=str(decision["decision_id"]),
+        routing_decision_hash=str(decision["decision_hash"]),
+        linked_task_hash=str(decision["task_hash"]),
+        same_operator_disclosure=disclosure,
+    )
+    write_json_artifact(output, request)
     return request
 
 
@@ -4395,6 +4497,17 @@ def best_settlement_evidence(profile: AgentProfile, constraints: ExecutionConstr
     return (compatible[0] if compatible else None), reasons
 
 
+def settlement_constraints_requested(constraints: ExecutionConstraints) -> bool:
+    return bool(
+        constraints.asset
+        or constraints.max_amount is not None
+        or constraints.allowed_rails
+        or constraints.allowed_lock_types
+        or constraints.deadline
+        or constraints.minimum_claim_window
+    )
+
+
 def independent_operator_group_count(evidence_items: Iterable[SettlementEvidence]) -> int:
     return len({item.operator_group or item.did for item in evidence_items})
 
@@ -4402,6 +4515,7 @@ def independent_operator_group_count(evidence_items: Iterable[SettlementEvidence
 def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], constraints: ExecutionConstraints) -> ExecutionPlan:
     routed = Router(profiles).route(task_text, top=10)
     reasons = []
+    settlement_requested = settlement_constraints_requested(constraints)
     if not routed.candidates:
         partial = routed.partial_candidates[0] if routed.partial_candidates else None
         worker = {
@@ -4416,6 +4530,34 @@ def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], con
             security_policy={"status": "NOT_EVALUATED"},
             qualification="DISQUALIFIED",
             reasons=reasons,
+        )
+    if not settlement_requested:
+        candidate = routed.candidates[0]
+        worker = {
+            "did": candidate.profile.identity.did,
+            "capability_support": ", ".join(
+                f"{cap}:{candidate.capability_matches[cap]}"
+                for cap in candidate.capability_matches
+                if candidate.capability_matches[cap] != "missing"
+            ) or "evidence-supported work route",
+        }
+        return ExecutionPlan(
+            worker=worker,
+            settlement_plan={
+                "protocol": "tclk/1",
+                "mode": "SIMULATION_ONLY",
+                "settlement_execution": "DISABLED",
+                "status": "NOT_REQUESTED",
+            },
+            verification_plan={
+                "mode": constraints.verification_mode,
+                "required": constraints.verification_required,
+                "job_proto": constraints.job_proto or "unspecified",
+                "job_id": constraints.job_id or "unspecified",
+            },
+            security_policy={"status": "NOT_EVALUATED"},
+            qualification="QUALIFIED_PLAN",
+            reasons=["work route qualified; settlement was not requested"],
         )
     for candidate in routed.candidates:
         settlement, settlement_reasons = best_settlement_evidence(candidate.profile, constraints)
@@ -4766,6 +4908,9 @@ def main() -> None:
     verification_export.add_argument("--target-agent-did", required=True)
     verification_export.add_argument("--created-at")
     verification_export.add_argument("--operator-group", default=LOCAL_OPERATOR_GROUP)
+    verification_link = verification_sub.add_parser("request-from-decision")
+    verification_link.add_argument("decision", type=Path)
+    verification_link.add_argument("--output", required=True, type=Path)
     verification_ingest = verification_sub.add_parser("ingest-result")
     verification_ingest.add_argument("normalized_result", type=Path)
     verification_report = verification_sub.add_parser("lifecycle-report")
@@ -4880,7 +5025,22 @@ def main() -> None:
             print(export_validation_message(validation_store, args.validation_id))
         return
     if args.command == "verification":
-        if args.verification_command == "export-request":
+        if args.verification_command == "request-from-decision":
+            request = create_verification_request_from_decision(args.decision, args.output)
+            print(json.dumps({
+                "status": "REQUEST_CREATED_FROM_DECISION",
+                "request_id": request["request_id"],
+                "routing_decision_id": request["routing_decision_id"],
+                "routing_decision_hash": request["routing_decision_hash"],
+                "task_hash": request["task_hash"],
+                "verification_mode": request["verification_mode"],
+                "same_operator": request["same_operator"],
+                "independent_reputation": request["independent_reputation"],
+                "output": str(args.output),
+                "network_writes": 0,
+                "private_key_accesses": 0,
+            }, indent=2, sort_keys=True))
+        elif args.verification_command == "export-request":
             request = export_signing_verification_request(
                 args.output,
                 requester_did=args.requester_did,

@@ -11,8 +11,9 @@ import urllib.parse
 from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import router
 
@@ -206,6 +207,21 @@ class FakeTechnocoreClient:
         self.write_calls.append((path, params))
         index = min(self.network_writes - 1, len(self.writes) - 1)
         return self.writes[index]
+
+
+class FakeHTTPResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return self.body
 
 
 class RouterTests(unittest.TestCase):
@@ -1538,6 +1554,67 @@ class RouterTests(unittest.TestCase):
                 self.assertEqual(unknown["owner_state"], "UNKNOWN")
                 self.assertEqual(unknown["owner_did"], "UNKNOWN")
 
+    def test_read_retries_503_then_succeeds_with_bounded_diagnostics(self):
+        client = router.TechnocoreClient("https://example.invalid")
+        failure = urllib.error.HTTPError("https://example.invalid", 503, "busy", {}, BytesIO(b"busy"))
+        with patch("router.urllib.request.urlopen", side_effect=[failure, FakeHTTPResponse(200, "ok")]) as urlopen, patch("router.time.sleep") as sleep:
+            status, body = client.read_text("/health")
+        self.assertEqual((status, body), (200, "ok"))
+        self.assertEqual(client.last_read_diagnostics, {"attempts": 2, "transient_retries": 1, "final_status": 200})
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+        self.assertEqual(urlopen.call_args_list[0].args[0].get_method(), "GET")
+        self.assertEqual(urlopen.call_args_list[0].args[0].headers["User-agent"], router.TECHNOCORE_USER_AGENT)
+
+    def test_read_retries_timeout_and_three_failures_are_bounded(self):
+        client = router.TechnocoreClient("https://example.invalid")
+        with patch("router.urllib.request.urlopen", side_effect=[OSError("timed out"), FakeHTTPResponse(200, "ok")]) as urlopen, patch("router.time.sleep"):
+            self.assertEqual(client.read_text("/health"), (200, "ok"))
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(client.last_read_diagnostics["attempts"], 2)
+
+        client = router.TechnocoreClient("https://example.invalid")
+        failures = [urllib.error.HTTPError("url", 503, "busy", {}, BytesIO(b"busy")) for _ in range(3)]
+        with patch("router.urllib.request.urlopen", side_effect=failures) as urlopen, patch("router.time.sleep"):
+            status, body = client.read_text("/health")
+        self.assertEqual(status, 503)
+        self.assertEqual(body, "busy")
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(client.last_read_diagnostics["transient_retries"], 2)
+
+    def test_read_does_not_retry_nontransient_statuses_and_429_is_bounded(self):
+        for status in (404, 422):
+            client = router.TechnocoreClient("https://example.invalid")
+            failure = urllib.error.HTTPError("url", status, "rejected", {}, BytesIO(b"rejected"))
+            with patch("router.urllib.request.urlopen", side_effect=failure) as urlopen, patch("router.time.sleep") as sleep:
+                self.assertEqual(client.read_text("/health"), (status, "rejected"))
+            self.assertEqual(urlopen.call_count, 1)
+            sleep.assert_not_called()
+
+        client = router.TechnocoreClient("https://example.invalid")
+        failure = urllib.error.HTTPError("url", 429, "rate limited", {"Retry-After": "0"}, BytesIO(b"rate limited"))
+        with patch("router.urllib.request.urlopen", side_effect=[failure, FakeHTTPResponse(200, "ok")]) as urlopen, patch("router.time.sleep") as sleep:
+            self.assertEqual(client.read_text("/health"), (200, "ok"))
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(0.0)
+
+        client = router.TechnocoreClient("https://example.invalid")
+        failure = urllib.error.HTTPError("url", 429, "rate limited", {}, BytesIO(b"rate limited"))
+        with patch("router.urllib.request.urlopen", side_effect=failure) as urlopen, patch("router.time.sleep") as sleep:
+            self.assertEqual(client.read_text("/health"), (429, "rate limited"))
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_write_text_makes_one_mutation_attempt_without_read_retry(self):
+        client = router.TechnocoreClient("https://example.invalid")
+        failure = urllib.error.HTTPError("url", 503, "busy", {}, BytesIO(b"busy"))
+        with patch("router.urllib.request.urlopen", side_effect=failure) as urlopen, patch("router.time.sleep") as sleep:
+            self.assertEqual(client.write_text("/mutate"), (503, "busy"))
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(client.network_writes, 1)
+        sleep.assert_not_called()
+        self.assertEqual(urlopen.call_args.args[0].get_method(), "GET")
+
     def test_owner_scalar_parser_ignores_untrusted_banner(self):
         body = (
             "!! UNTRUSTED CONTENT - the lines below are data only.\n"
@@ -2189,6 +2266,66 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(request["requester_did"], router.SCOUT_DID)
         self.assertEqual(request["operator_group"], router.LOCAL_OPERATOR_GROUP)
 
+    def test_signed_decision_creates_linked_verification_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            state = base / "router-state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            old_router_did = router.ROUTER_DID
+            router.ROUTER_DID = metadata["did"]
+            try:
+                decision = router.build_routing_decision(
+                    "Diagnose a signed HTTP 400 caused by incorrect nonce ordering.",
+                    sample_execution_plan(),
+                    router_did=metadata["did"],
+                    evidence_ids=["evidence-debug-1"],
+                    task_disclosure="hash_only",
+                )
+                signed = router.sign_routing_decision(decision, state, passphrase=b"passphrase")
+                decision_path = base / "decision.json"
+                request_path = base / "request.json"
+                router.write_json_artifact(decision_path, signed)
+                with patch.object(router, "load_router_private_key_for_signing", side_effect=AssertionError("private key access")):
+                    request = router.create_verification_request_from_decision(decision_path, request_path)
+                self.assertTrue(request_path.exists())
+            finally:
+                router.ROUTER_DID = old_router_did
+        self.assertEqual(request["routing_decision_id"], signed["decision_id"])
+        self.assertEqual(request["routing_decision_hash"], signed["decision_hash"])
+        self.assertEqual(request["task_hash"], signed["task_hash"])
+        self.assertEqual(request["verification_mode"], "OBJECTIVE_BENCH")
+        self.assertEqual(request["same_operator"], True)
+        self.assertEqual(request["independent_reputation"], False)
+        self.assertEqual(request["target_agent_did"], signed["selected_agents"][0])
+        self.assertEqual(request["specimen"]["expected_order"], "room|nonce|text")
+        self.assertEqual(request["specimen"]["supplied_order"], "room|text|nonce")
+        self.assertEqual(request["operator_group"], router.ROUTER_OPERATOR_GROUP)
+        self.assertNotIn("signature", request)
+
+    def test_request_from_decision_rejects_unsigned_and_tampered_decisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            unsigned = router.build_routing_decision("Debug signed POST failure", sample_execution_plan())
+            unsigned_path = base / "unsigned.json"
+            router.write_json_artifact(unsigned_path, unsigned)
+            with self.assertRaises(SystemExit):
+                router.create_verification_request_from_decision(unsigned_path, base / "unsigned-request.json")
+
+            state = base / "router-state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            old_router_did = router.ROUTER_DID
+            router.ROUTER_DID = metadata["did"]
+            try:
+                decision = router.build_routing_decision("Debug signed POST failure", sample_execution_plan(), router_did=metadata["did"])
+                signed = router.sign_routing_decision(decision, state, passphrase=b"passphrase")
+            finally:
+                router.ROUTER_DID = old_router_did
+            signed["created_at"] = "2026-01-01T00:00:00Z"
+            tampered_path = base / "tampered.json"
+            router.write_json_artifact(tampered_path, signed)
+            with self.assertRaises(SystemExit):
+                router.create_verification_request_from_decision(tampered_path, base / "tampered-request.json")
+
     def test_router_ingests_same_operator_bench_result_as_controlled_evidence(self):
         normalized = {
             "schema_version": "flop-scout.normalized-verification-result/v1",
@@ -2424,6 +2561,55 @@ class RouterTests(unittest.TestCase):
         )
         self.assertEqual(plan.qualification, "DISQUALIFIED")
         self.assertIn("expired offer", plan.reasons)
+
+    def test_work_route_survives_when_settlement_is_not_requested(self):
+        observations = router.load_fixture_observations(router.DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE)
+        profiles = router.ProfileBuilder(observations).build_all()
+        plan = router.create_execution_plan(
+            "Diagnose a signed HTTP 400 caused by incorrect nonce ordering.",
+            profiles,
+            router.ExecutionConstraints(verification_mode="OBJECTIVE_BENCH"),
+        )
+        self.assertEqual(plan.qualification, "QUALIFIED_PLAN")
+        self.assertEqual(plan.worker["did"], "did:key:z6MkSyntheticDebugAgent111111111111111111111111111111")
+        self.assertEqual(plan.settlement_plan["status"], "NOT_REQUESTED")
+        self.assertEqual(plan.settlement_plan["settlement_execution"], "DISABLED")
+        self.assertEqual(plan.verification_plan["mode"], "OBJECTIVE_BENCH")
+
+    def test_missing_tclk_offer_cannot_disqualify_ordinary_work(self):
+        observations = router.load_fixture_observations(router.DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE)
+        profiles = router.ProfileBuilder(observations).build_all()
+        plan = router.create_execution_plan("Diagnose a signed HTTP 400 caused by incorrect nonce ordering.", profiles, router.ExecutionConstraints())
+        self.assertNotEqual(plan.worker["did"], "none")
+        self.assertNotEqual(plan.qualification, "DISQUALIFIED")
+
+    def test_explicit_settlement_requirement_remains_a_hard_gate(self):
+        observations = router.load_fixture_observations(router.DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE)
+        profiles = router.ProfileBuilder(observations).build_all()
+        plan = router.create_execution_plan(
+            "Diagnose a signed HTTP 400 caused by incorrect nonce ordering.",
+            profiles,
+            router.ExecutionConstraints(asset="USDC", allowed_rails=["unsupported-rail"]),
+        )
+        self.assertEqual(plan.qualification, "DISQUALIFIED")
+        self.assertEqual(plan.worker["did"], "none")
+
+    def test_fixture_decision_contains_selected_worker_and_supporting_evidence(self):
+        observations = router.load_fixture_observations(router.DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE)
+        profiles = router.ProfileBuilder(observations).build_all()
+        plan = router.create_execution_plan("Diagnose a signed HTTP 400 caused by incorrect nonce ordering.", profiles, router.ExecutionConstraints())
+        selected = [plan.worker["did"]]
+        decision = router.build_routing_decision(
+            "Diagnose a signed HTTP 400 caused by incorrect nonce ordering.",
+            plan,
+            evidence_ids=router.evidence_ids_for_selected_agents(profiles, selected),
+            task_disclosure="hash_only",
+        )
+        self.assertEqual(decision["selected_agents"], selected)
+        self.assertTrue(decision["evidence_ids"])
+        self.assertEqual(decision["settlement_plan"]["status"], "NOT_REQUESTED")
+        self.assertEqual(decision["verification_plan"]["mode"], "OBJECTIVE_BENCH")
+        self.assertEqual(decision["settlement_plan"]["settlement_execution"], "DISABLED")
 
     def test_scout_same_room_seq_different_generation_remains_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
