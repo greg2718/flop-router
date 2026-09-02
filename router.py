@@ -886,7 +886,11 @@ def technocore_status(client: TechnocoreClient | None = None, state_dir: Path = 
         "mailbox_owner": f"/kv/room-owners/{quote_path_component(ROUTER_MAILBOX)}",
     }.items():
         status, body = client.read_text(path, {"format": "json"} if name.endswith("_recent") else None)
-        checks[name] = {"status": status, "body_preview": body[:240]}
+        check = {"http_status": status, "body_preview": body[:240]}
+        if name.endswith("_owner"):
+            owner = body.strip() if status == 200 and body.strip().startswith("did:key:") else None
+            check["owner_did"] = owner
+        checks[name] = check
     return {
         "router_did": router_did,
         "canonical_room": ROUTER_CANONICAL_ROOM,
@@ -895,6 +899,39 @@ def technocore_status(client: TechnocoreClient | None = None, state_dir: Path = 
         "network_writes": 0,
         "private_key_accessed": "NO",
     }
+
+
+def ambiguous_write_response(status: int, body: str) -> bool:
+    return status == 0 or "READ_FAILED" in body or "timed out" in body.lower() or "timeout" in body.lower()
+
+
+def read_room_owner(client: TechnocoreClient, room: str) -> tuple[int, str | None, str]:
+    status, body = client.read_text(f"/kv/room-owners/{quote_path_component(room)}")
+    owner = body.strip() if status == 200 and body.strip().startswith("did:key:") else None
+    return status, owner, body
+
+
+def room_readback_contains_signed_message(body: str, did: str, nonce: int, text: str) -> bool:
+    def walk(value):
+        if isinstance(value, dict):
+            values = {str(k): v for k, v in value.items()}
+            value_did = values.get("did") or values.get("from") or values.get("sender")
+            value_nonce = values.get("nonce")
+            value_text = values.get("text")
+            if value_did == did and str(value_nonce) == str(nonce) and value_text == text:
+                return True
+            return any(walk(child) for child in value.values())
+        if isinstance(value, list):
+            return any(walk(child) for child in value)
+        return False
+
+    try:
+        parsed = json.loads(body)
+        if walk(parsed):
+            return True
+    except json.JSONDecodeError:
+        pass
+    return did in body and str(nonce) in body and text in body
 
 
 def claim_technocore_room(
@@ -907,20 +944,21 @@ def claim_technocore_room(
     if not room.startswith("d-"):
         raise SystemExit("Only d- rooms may be claimed.")
     client = client or TechnocoreClient()
-    private_key, metadata = load_router_private_key_for_signing(state_dir, passphrase=passphrase)
-    router_did = str(metadata["did"])
-    owner_status, owner_body = client.read_text(f"/kv/room-owners/{quote_path_component(room)}")
-    existing_owner = owner_body.strip()
-    if owner_status == 200 and existing_owner:
+    router_did = current_router_did_for_status(state_dir)
+    _owner_status, existing_owner, _owner_body = read_room_owner(client, room)
+    if existing_owner:
         if existing_owner == router_did:
             return {
                 "status": "ALREADY_OWNED",
+                "write_outcome": "NO_WRITE_NEEDED",
                 "room": room,
                 "owner": router_did,
                 "network_writes": client.network_writes,
-                "private_key_accessed": "YES",
+                "private_key_accessed": "NO",
             }
         raise SystemExit(f"Room {room} is already owned by another DID.")
+    private_key, metadata = load_router_private_key_for_signing(state_dir, passphrase=passphrase)
+    router_did = str(metadata["did"])
     nonce = next_technocore_nonce(f"note:room-owners:{room}", state_dir)
     namespace = "room-owners"
     payload = technocore_note_signature_payload(namespace, room, nonce, router_did)
@@ -930,6 +968,38 @@ def claim_technocore_room(
         f"{quote_path_component(router_did)}/{quote_path_component(sig)}/{nonce}/{quote_path_component(router_did)}"
     )
     status, body = client.write_text(path, {"if_absent": "1"})
+    if ambiguous_write_response(status, body):
+        reread_status, reread_owner, reread_body = read_room_owner(client, room)
+        if reread_owner == router_did:
+            return {
+                "status": "CLAIM_CONFIRMED_AFTER_AMBIGUOUS_RESPONSE",
+                "write_outcome": "UNKNOWN_THEN_CONFIRMED",
+                "action": "RE_READ_STATE",
+                "room": room,
+                "owner": router_did,
+                "nonce": nonce,
+                "signature_payload": payload,
+                "response_status": status,
+                "reread_status": reread_status,
+                "network_writes": client.network_writes,
+                "private_key_accessed": "YES",
+            }
+        if reread_owner and reread_owner != router_did:
+            raise SystemExit(f"CONFLICT: room {room} is owned by another DID after ambiguous response.")
+        return {
+            "status": "UNKNOWN",
+            "write_outcome": "UNKNOWN",
+            "action": "RE_READ_STATE",
+            "room": room,
+            "owner": reread_owner,
+            "nonce": nonce,
+            "signature_payload": payload,
+            "response_status": status,
+            "reread_status": reread_status,
+            "reread_preview": reread_body[:240],
+            "network_writes": client.network_writes,
+            "private_key_accessed": "YES",
+        }
     if status >= 400 or status == 0:
         raise SystemExit(f"Technocore room claim failed with status {status}: {body[:240]}")
     return {
@@ -937,6 +1007,7 @@ def claim_technocore_room(
         "room": room,
         "owner": router_did,
         "nonce": nonce,
+        "write_outcome": "CONFIRMED",
         "signature_payload": payload,
         "response_status": status,
         "response_preview": body[:240],
@@ -954,9 +1025,13 @@ def post_technocore_signed(
     passphrase: bytes | None = None,
 ) -> dict:
     client = client or TechnocoreClient()
+    normalized_text = technocore_normalize_text(text)
+    if not room:
+        raise SystemExit("Room must not be empty.")
+    if not normalized_text:
+        raise SystemExit("Post text must not be empty after normalization.")
     private_key, metadata = load_router_private_key_for_signing(state_dir, passphrase=passphrase)
     router_did = str(metadata["did"])
-    normalized_text = technocore_normalize_text(text)
     nonce = next_technocore_nonce(f"room:{room}", state_dir)
     payload = technocore_message_signature_payload(room, nonce, normalized_text)
     sig = sign_base64url(private_key, payload)
@@ -965,6 +1040,40 @@ def post_technocore_signed(
         f"{quote_path_component(sig)}/{nonce}/{quote_path_component(normalized_text)}"
     )
     status, body = client.write_text(path)
+    if ambiguous_write_response(status, body):
+        reread_status, reread_body = client.read_text(f"/r/{quote_path_component(room)}", {"format": "json"})
+        if reread_status == 200 and room_readback_contains_signed_message(reread_body, router_did, nonce, normalized_text):
+            return {
+                "status": "POST_CONFIRMED_AFTER_AMBIGUOUS_RESPONSE",
+                "write_outcome": "UNKNOWN_THEN_CONFIRMED",
+                "action": "RE_READ_BEFORE_RETRY",
+                "room": room,
+                "did": router_did,
+                "nonce": nonce,
+                "text": normalized_text,
+                "signature_payload": payload,
+                "response_status": status,
+                "reread_status": reread_status,
+                "network_writes": client.network_writes,
+                "private_key_accessed": "YES",
+                "untrusted_remote_content": True,
+            }
+        return {
+            "status": "UNKNOWN",
+            "write_outcome": "UNKNOWN",
+            "action": "RE_READ_BEFORE_RETRY",
+            "room": room,
+            "did": router_did,
+            "nonce": nonce,
+            "text": normalized_text,
+            "signature_payload": payload,
+            "response_status": status,
+            "reread_status": reread_status,
+            "reread_preview": reread_body[:240],
+            "network_writes": client.network_writes,
+            "private_key_accessed": "YES",
+            "untrusted_remote_content": True,
+        }
     if status == 422:
         raise SystemExit(f"Technocore duplicate-content refusal (422). No rewrite or retry was attempted: {body[:240]}")
     if status >= 400 or status == 0:
@@ -975,6 +1084,7 @@ def post_technocore_signed(
         "did": router_did,
         "nonce": nonce,
         "text": normalized_text,
+        "write_outcome": "CONFIRMED",
         "signature_payload": payload,
         "response_status": status,
         "response_preview": body[:240],
@@ -991,7 +1101,9 @@ def print_technocore_status(status: dict) -> None:
     print(f"canonical_room: {status['canonical_room']}")
     print(f"mailbox: {status['mailbox']}")
     for name, check in status["checks"].items():
-        print(f"{name}: {check['status']}")
+        print(f"{name}_status: {check['http_status']}")
+        if "owner_did" in check:
+            print(f"{name}_did: {check['owner_did'] or 'UNKNOWN_OR_UNOWNED'}")
     print(f"network_writes: {status['network_writes']}")
     print(f"private_key_accessed: {status['private_key_accessed']}")
     print("mailbox_identity: room name does not establish identity; signed DID provenance does.")
@@ -1001,6 +1113,10 @@ def print_technocore_write_result(result: dict) -> None:
     for key, value in result.items():
         if key == "signature_payload":
             print(f"{key}: {value}")
+        elif key == "write_outcome":
+            print(f"WRITE_OUTCOME: {value}")
+        elif key == "action":
+            print(f"ACTION: {value}")
         elif key != "response_preview":
             print(f"{key}: {value}")
     if result.get("response_preview"):

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -193,7 +194,12 @@ class FakeTechnocoreClient:
 
     def read_text(self, path, params=None):
         self.read_calls.append((path, params))
-        return self.reads.get(path, (404, ""))
+        value = self.reads.get(path, (404, ""))
+        if isinstance(value, list):
+            if len(value) > 1:
+                return value.pop(0)
+            return value[0]
+        return value
 
     def write_text(self, path, params=None):
         self.network_writes += 1
@@ -1541,6 +1547,67 @@ class RouterTests(unittest.TestCase):
             result = router.claim_technocore_room("d-flop-router", state, owned, passphrase=b"passphrase")
             self.assertEqual(result["status"], "ALREADY_OWNED")
             self.assertEqual(owned.network_writes, 0)
+            self.assertEqual(result["private_key_accessed"], "NO")
+
+    def test_already_owned_claim_does_not_access_private_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_state = Path(tmp) / "missing_state"
+            client = FakeTechnocoreClient(reads={"/kv/room-owners/d-flop-router": (200, router.ROUTER_DID)})
+            result = router.claim_technocore_room("d-flop-router", missing_state, client)
+            self.assertEqual(result["status"], "ALREADY_OWNED")
+            self.assertEqual(result["private_key_accessed"], "NO")
+            self.assertEqual(client.network_writes, 0)
+            self.assertFalse(missing_state.exists())
+
+    def test_conflicting_owner_does_not_access_private_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_state = Path(tmp) / "missing_state"
+            client = FakeTechnocoreClient(reads={"/kv/room-owners/d-flop-router": (200, "did:key:z6MkOtherOwner11111111111111111111111111111")})
+            with self.assertRaises(SystemExit):
+                router.claim_technocore_room("d-flop-router", missing_state, client)
+            self.assertEqual(client.network_writes, 0)
+            self.assertFalse(missing_state.exists())
+
+    def test_timeout_after_successful_claim_is_recovered_by_state_reread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            client = FakeTechnocoreClient(
+                reads={"/kv/room-owners/d-flop-router": [(404, ""), (200, metadata["did"])]},
+                writes=[(0, "READ_FAILED: The read operation timed out")],
+            )
+            result = router.claim_technocore_room("d-flop-router", state, client, passphrase=b"passphrase")
+            self.assertEqual(result["status"], "CLAIM_CONFIRMED_AFTER_AMBIGUOUS_RESPONSE")
+            self.assertEqual(result["write_outcome"], "UNKNOWN_THEN_CONFIRMED")
+            self.assertEqual(result["action"], "RE_READ_STATE")
+            self.assertEqual(client.network_writes, 1)
+            self.assertEqual(len(client.write_calls), 1)
+
+    def test_ambiguous_claim_unresolved_reports_unknown_without_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            router.create_router_identity(state, passphrase=b"passphrase")
+            client = FakeTechnocoreClient(
+                reads={"/kv/room-owners/d-flop-router": [(404, ""), (404, "")]},
+                writes=[(0, "READ_FAILED: The read operation timed out")],
+            )
+            result = router.claim_technocore_room("d-flop-router", state, client, passphrase=b"passphrase")
+            self.assertEqual(result["status"], "UNKNOWN")
+            self.assertEqual(result["write_outcome"], "UNKNOWN")
+            self.assertEqual(result["action"], "RE_READ_STATE")
+            self.assertEqual(client.network_writes, 1)
+
+    def test_ambiguous_claim_with_conflict_fails_closed_without_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            router.create_router_identity(state, passphrase=b"passphrase")
+            client = FakeTechnocoreClient(
+                reads={"/kv/room-owners/d-flop-router": [(404, ""), (200, "did:key:z6MkOtherOwner11111111111111111111111111111")]},
+                writes=[(0, "READ_FAILED: The read operation timed out")],
+            )
+            with self.assertRaises(SystemExit):
+                router.claim_technocore_room("d-flop-router", state, client, passphrase=b"passphrase")
+            self.assertEqual(client.network_writes, 1)
 
     def test_post_signs_room_nonce_text_and_nonce_is_monotonic(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1567,6 +1634,66 @@ class RouterTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 router.post_technocore_signed("d-flop-router", "hello", state, duplicate, passphrase=b"passphrase")
             self.assertEqual(duplicate.network_writes, 1)
+
+    def test_timeout_after_successful_post_is_recovered_by_exact_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+
+            class ReadbackClient(FakeTechnocoreClient):
+                def read_text(self, path, params=None):
+                    self.read_calls.append((path, params))
+                    if path == "/r/d-flop-router" and self.write_calls:
+                        write_path, _params = self.write_calls[0]
+                        parts = write_path.split("/")
+                        sig = parts[5]
+                        nonce = parts[6]
+                        text = urllib.parse.unquote(parts[7])
+                        return 200, json.dumps({"messages": [{"did": metadata["did"], "nonce": nonce, "text": text, "sig": sig}]})
+                    return 404, ""
+
+            client = ReadbackClient(writes=[(0, "READ_FAILED: The read operation timed out")])
+            result = router.post_technocore_signed("d-flop-router", "hello", state, client, passphrase=b"passphrase")
+            self.assertEqual(result["status"], "POST_CONFIRMED_AFTER_AMBIGUOUS_RESPONSE")
+            self.assertEqual(result["write_outcome"], "UNKNOWN_THEN_CONFIRMED")
+            self.assertEqual(result["action"], "RE_READ_BEFORE_RETRY")
+            self.assertEqual(client.network_writes, 1)
+            self.assertEqual(len(client.write_calls), 1)
+
+    def test_ambiguous_post_unresolved_reports_unknown_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            router.create_router_identity(state, passphrase=b"passphrase")
+            client = FakeTechnocoreClient(
+                reads={"/r/d-flop-router": (200, json.dumps({"messages": []}))},
+                writes=[(0, "READ_FAILED: The read operation timed out")],
+            )
+            result = router.post_technocore_signed("d-flop-router", "hello", state, client, passphrase=b"passphrase")
+            self.assertEqual(result["status"], "UNKNOWN")
+            self.assertEqual(result["write_outcome"], "UNKNOWN")
+            self.assertEqual(result["action"], "RE_READ_BEFORE_RETRY")
+            self.assertEqual(client.network_writes, 1)
+            self.assertEqual(len(client.write_calls), 1)
+
+    def test_post_validates_before_private_key_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_state = Path(tmp) / "missing_state"
+            with self.assertRaises(SystemExit):
+                router.post_technocore_signed("d-flop-router", "\n\n", missing_state, FakeTechnocoreClient())
+            self.assertFalse(missing_state.exists())
+
+    def test_status_exposes_owner_did_separately_from_http_status(self):
+        client = FakeTechnocoreClient(reads={"/kv/room-owners/d-flop-router": (200, router.ROUTER_DID)})
+        status = router.technocore_status(client, Path("/tmp/nonexistent-router-state"))
+        owner = status["checks"]["canonical_room_owner"]
+        self.assertEqual(owner["http_status"], 200)
+        self.assertEqual(owner["owner_did"], router.ROUTER_DID)
+        out = StringIO()
+        with redirect_stdout(out):
+            router.print_technocore_status(status)
+        text = out.getvalue()
+        self.assertIn("canonical_room_owner_status: 200", text)
+        self.assertIn(f"canonical_room_owner_did: {router.ROUTER_DID}", text)
 
     def test_remote_urls_and_mailbox_names_do_not_trigger_execution_or_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

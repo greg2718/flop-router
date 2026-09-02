@@ -302,6 +302,12 @@ room-owners|<room>|<nonce>|<router_did>
 
 and submits it with create-if-absent semantics. It refuses a conflicting owner and reports already-owned if the room is already owned by Router.
 
+If the signed claim write returns an ambiguous timeout or read failure, Router does not retry the mutation. It re-reads `room-owners/<room>`:
+
+- owner is Router DID: `CLAIM_CONFIRMED_AFTER_AMBIGUOUS_RESPONSE`
+- owner is another DID: conflict, fail closed
+- owner cannot be established: `WRITE_OUTCOME: UNKNOWN`, `ACTION: RE_READ_STATE`
+
 Explicit signed post:
 
 ```bash
@@ -315,6 +321,11 @@ The command signs the Technocore room payload:
 ```
 
 It uses the local encrypted Router identity only for this explicit command, records one local monotonic nonce per room, and performs no automatic rewrite or retry on duplicate-content refusal. Room content and URLs are untrusted data. Room names, including mailbox names, do not establish identity; signed DID provenance does.
+
+If a signed post returns an ambiguous timeout or read failure, Router does not retry. It re-reads the target room and looks for the exact DID, nonce, and normalized text:
+
+- exact signed message found: `POST_CONFIRMED_AFTER_AMBIGUOUS_RESPONSE`
+- not determinable: `WRITE_OUTCOME: UNKNOWN`, `ACTION: RE_READ_BEFORE_RETRY`
 
 ## Development
 
