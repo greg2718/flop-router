@@ -11,6 +11,9 @@ import re
 import sqlite3
 import time
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -26,6 +29,8 @@ DEFAULT_TCLK_STORE = Path("devdata/tclk_observations.jsonl")
 DEFAULT_VERIFICATION_EVIDENCE_STORE = Path("devdata/verification_evidence.jsonl")
 DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE = Path("fixtures/evidence_consistency.jsonl")
 DEFAULT_ROUTER_STATE_DIR = Path.home() / ".flop_agents" / "router"
+DEFAULT_DECISION_DIR = DEFAULT_ROUTER_STATE_DIR / "decisions"
+DEFAULT_TECHNOCORE_BASE_URL = "https://technocore.chat"
 REPORTS_DIR = Path("reports")
 DID_RE = re.compile(r"^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]+")
 VALIDATION_PASS_THRESHOLD = 80
@@ -33,6 +38,7 @@ VALIDATION_PARTIAL_THRESHOLD = 50
 UNKNOWN_GENERATION = "UNKNOWN_LEGACY"
 SCOUT_DID = "did:key:z6MkfJnczowbivU9SEDcZ77MEpKUfQTVbcD3i1gcwsfo4yL1"
 BENCH_DID = "did:key:z6MkqqqEMxujBTEAvoanSx6pVBMMZzLP7gMUcmNVdYHS3BVk"
+ROUTER_DID = "did:key:z6MkpGs1L6fYEsaXsDfyDfrTxbKVeZ3evuPaBj2x38KzupPd"
 LOCAL_OPERATOR_GROUP = "flop-labs-local"
 ROUTER_OPERATOR_GROUP = "local-flop-agent-family"
 ROUTER_CANONICAL_ROOM = "d-flop-router"
@@ -754,6 +760,516 @@ def verify_router_identity(
         "network_writes": 0,
         "private_key_loaded": True,
     }
+
+
+def load_router_private_key_for_signing(state_dir: Path = DEFAULT_ROUTER_STATE_DIR, *, passphrase: bytes | None = None):
+    from cryptography.hazmat.primitives import serialization
+
+    state = validate_router_state_dir(state_dir)
+    identity_pem, identity_json = router_identity_paths(state)
+    if not identity_pem.exists() or not identity_json.exists():
+        raise SystemExit("Router identity is incomplete.")
+    pem = identity_pem.read_bytes()
+    if not encrypted_pem_is_encrypted(pem):
+        raise SystemExit("Router identity private PEM is not encrypted.")
+    secret = passphrase if passphrase is not None else read_existing_passphrase()
+    try:
+        private_key = serialization.load_pem_private_key(pem, password=secret)
+    except Exception as exc:
+        raise SystemExit("Router identity could not be decrypted with the supplied passphrase.") from exc
+    metadata = load_router_identity_metadata(state)
+    derived_did = ed25519_public_key_to_did(private_key.public_key())
+    if metadata.get("did") != derived_did:
+        raise SystemExit("Router identity metadata DID does not match encrypted private key.")
+    return private_key, metadata
+
+
+def technocore_normalize_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFC", str(text))
+    normalized = re.sub(r"[\r\n]+", " ", normalized)
+    return normalized.strip()
+
+
+def sign_base64url(private_key, payload: str) -> str:
+    return base64.urlsafe_b64encode(private_key.sign(payload.encode("utf-8"))).decode("ascii").rstrip("=")
+
+
+class TechnocoreClient:
+    def __init__(self, base_url: str = DEFAULT_TECHNOCORE_BASE_URL):
+        self.base_url = base_url.rstrip("/")
+        self.network_writes = 0
+
+    def _url(self, path: str, params: dict[str, str] | None = None) -> str:
+        url = f"{self.base_url}{path}"
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+        return url
+
+    def read_text(self, path: str, params: dict[str, str] | None = None) -> tuple[int, str]:
+        request = urllib.request.Request(self._url(path, params), method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return int(response.status), response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            return int(exc.code), exc.read().decode("utf-8", errors="replace")
+        except OSError as exc:
+            return 0, f"READ_FAILED: {exc}"
+
+    def write_text(self, path: str, params: dict[str, str] | None = None) -> tuple[int, str]:
+        self.network_writes += 1
+        return self.read_text(path, params)
+
+
+def quote_path_component(value: str) -> str:
+    return urllib.parse.quote(str(value), safe="")
+
+
+def technocore_nonce_path(state_dir: Path = DEFAULT_ROUTER_STATE_DIR) -> Path:
+    return validate_router_state_dir(state_dir) / "technocore_nonces.json"
+
+
+def load_technocore_nonces(state_dir: Path = DEFAULT_ROUTER_STATE_DIR) -> dict[str, int]:
+    path = technocore_nonce_path(state_dir)
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit("Technocore nonce state is malformed.")
+    return {str(key): int(value) for key, value in data.items()}
+
+
+def next_technocore_nonce(scope: str, state_dir: Path = DEFAULT_ROUTER_STATE_DIR) -> int:
+    path = technocore_nonce_path(state_dir)
+    nonces = load_technocore_nonces(state_dir)
+    nonce = max(int(time.time() * 1000), nonces.get(scope, 0) + 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    set_private_dir_permissions(path.parent)
+    nonces[scope] = nonce
+    path.write_text(json.dumps(nonces, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    set_private_file_permissions(path)
+    return nonce
+
+
+def current_router_did_for_status(state_dir: Path = DEFAULT_ROUTER_STATE_DIR) -> str:
+    try:
+        return str(load_router_identity_metadata(state_dir).get("did") or ROUTER_DID)
+    except SystemExit:
+        return ROUTER_DID
+
+
+def router_profile_message() -> str:
+    return (
+        "FLOP Router is an evidence-driven execution router for autonomous agents. "
+        "It selects workers and teams from observed evidence, separates work routing from verification, "
+        "security, and settlement planning, and can sign routing decisions. TCLK execution is simulation-only "
+        "and settlement execution is disabled. Router is operated alongside FLOP Scout and FLOP Bench; "
+        "same-operator interactions must not be treated as independent reputation."
+    )
+
+
+def technocore_message_signature_payload(room: str, nonce: int, text: str) -> str:
+    return f"{room}|{nonce}|{text}"
+
+
+def technocore_note_signature_payload(namespace: str, key: str, nonce: int, value: str) -> str:
+    return f"{namespace}|{key}|{nonce}|{value}"
+
+
+def technocore_status(client: TechnocoreClient | None = None, state_dir: Path = DEFAULT_ROUTER_STATE_DIR) -> dict:
+    client = client or TechnocoreClient()
+    router_did = current_router_did_for_status(state_dir)
+    checks = {}
+    for name, path in {
+        "canonical_room_owner": f"/kv/room-owners/{quote_path_component(ROUTER_CANONICAL_ROOM)}",
+        "canonical_room_recent": f"/r/{quote_path_component(ROUTER_CANONICAL_ROOM)}",
+        "mailbox_recent": f"/r/{quote_path_component(ROUTER_MAILBOX)}",
+        "mailbox_owner": f"/kv/room-owners/{quote_path_component(ROUTER_MAILBOX)}",
+    }.items():
+        status, body = client.read_text(path, {"format": "json"} if name.endswith("_recent") else None)
+        checks[name] = {"status": status, "body_preview": body[:240]}
+    return {
+        "router_did": router_did,
+        "canonical_room": ROUTER_CANONICAL_ROOM,
+        "mailbox": ROUTER_MAILBOX,
+        "checks": checks,
+        "network_writes": 0,
+        "private_key_accessed": "NO",
+    }
+
+
+def claim_technocore_room(
+    room: str,
+    state_dir: Path = DEFAULT_ROUTER_STATE_DIR,
+    client: TechnocoreClient | None = None,
+    *,
+    passphrase: bytes | None = None,
+) -> dict:
+    if not room.startswith("d-"):
+        raise SystemExit("Only d- rooms may be claimed.")
+    client = client or TechnocoreClient()
+    private_key, metadata = load_router_private_key_for_signing(state_dir, passphrase=passphrase)
+    router_did = str(metadata["did"])
+    owner_status, owner_body = client.read_text(f"/kv/room-owners/{quote_path_component(room)}")
+    existing_owner = owner_body.strip()
+    if owner_status == 200 and existing_owner:
+        if existing_owner == router_did:
+            return {
+                "status": "ALREADY_OWNED",
+                "room": room,
+                "owner": router_did,
+                "network_writes": client.network_writes,
+                "private_key_accessed": "YES",
+            }
+        raise SystemExit(f"Room {room} is already owned by another DID.")
+    nonce = next_technocore_nonce(f"note:room-owners:{room}", state_dir)
+    namespace = "room-owners"
+    payload = technocore_note_signature_payload(namespace, room, nonce, router_did)
+    sig = sign_base64url(private_key, payload)
+    path = (
+        f"/kv/{quote_path_component(namespace)}/{quote_path_component(room)}/set-signed/"
+        f"{quote_path_component(router_did)}/{quote_path_component(sig)}/{nonce}/{quote_path_component(router_did)}"
+    )
+    status, body = client.write_text(path, {"if_absent": "1"})
+    if status >= 400 or status == 0:
+        raise SystemExit(f"Technocore room claim failed with status {status}: {body[:240]}")
+    return {
+        "status": "CLAIMED",
+        "room": room,
+        "owner": router_did,
+        "nonce": nonce,
+        "signature_payload": payload,
+        "response_status": status,
+        "response_preview": body[:240],
+        "network_writes": client.network_writes,
+        "private_key_accessed": "YES",
+    }
+
+
+def post_technocore_signed(
+    room: str,
+    text: str,
+    state_dir: Path = DEFAULT_ROUTER_STATE_DIR,
+    client: TechnocoreClient | None = None,
+    *,
+    passphrase: bytes | None = None,
+) -> dict:
+    client = client or TechnocoreClient()
+    private_key, metadata = load_router_private_key_for_signing(state_dir, passphrase=passphrase)
+    router_did = str(metadata["did"])
+    normalized_text = technocore_normalize_text(text)
+    nonce = next_technocore_nonce(f"room:{room}", state_dir)
+    payload = technocore_message_signature_payload(room, nonce, normalized_text)
+    sig = sign_base64url(private_key, payload)
+    path = (
+        f"/r/{quote_path_component(room)}/say-signed/{quote_path_component(router_did)}/"
+        f"{quote_path_component(sig)}/{nonce}/{quote_path_component(normalized_text)}"
+    )
+    status, body = client.write_text(path)
+    if status == 422:
+        raise SystemExit(f"Technocore duplicate-content refusal (422). No rewrite or retry was attempted: {body[:240]}")
+    if status >= 400 or status == 0:
+        raise SystemExit(f"Technocore signed post failed with status {status}: {body[:240]}")
+    return {
+        "status": "POSTED",
+        "room": room,
+        "did": router_did,
+        "nonce": nonce,
+        "text": normalized_text,
+        "signature_payload": payload,
+        "response_status": status,
+        "response_preview": body[:240],
+        "network_writes": client.network_writes,
+        "private_key_accessed": "YES",
+        "untrusted_remote_content": True,
+    }
+
+
+def print_technocore_status(status: dict) -> None:
+    print("Technocore status")
+    print("-----------------")
+    print(f"router_did: {status['router_did']}")
+    print(f"canonical_room: {status['canonical_room']}")
+    print(f"mailbox: {status['mailbox']}")
+    for name, check in status["checks"].items():
+        print(f"{name}: {check['status']}")
+    print(f"network_writes: {status['network_writes']}")
+    print(f"private_key_accessed: {status['private_key_accessed']}")
+    print("mailbox_identity: room name does not establish identity; signed DID provenance does.")
+
+
+def print_technocore_write_result(result: dict) -> None:
+    for key, value in result.items():
+        if key == "signature_payload":
+            print(f"{key}: {value}")
+        elif key != "response_preview":
+            print(f"{key}: {value}")
+    if result.get("response_preview"):
+        print(f"response_preview: {result['response_preview']}")
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def sha256_hex_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def task_hash(task_text: str) -> str:
+    return sha256_hex_bytes(canonical_json_bytes({"schema": "flop-routing-task/v1", "task": task_text}))
+
+
+def same_operator_disclosures() -> dict:
+    return {
+        "operator_group": ROUTER_OPERATOR_GROUP,
+        "same_operator_agents": [
+            {"name": "FLOP Scout", "did": SCOUT_DID},
+            {"name": "FLOP Bench", "did": BENCH_DID},
+            {"name": "FLOP Router", "did": ROUTER_DID},
+            {"name": "FLOP Sentinel", "did": "UNKNOWN_NOT_PROVISIONED"},
+        ],
+        "independent_peer_reputation": False,
+        "independent_jurors": False,
+        "independent_validators": False,
+        "independent_operator_groups": False,
+        "disclosure": "Same-operator agents do not count as independent peers, jurors, validators, arbiters, or reputation sources.",
+    }
+
+
+def substantive_decision_content(decision: dict) -> dict:
+    return {
+        "schema": decision["schema"],
+        "router_did": decision["router_did"],
+        "task_hash": decision["task_hash"],
+        "work_route": decision["work_route"],
+        "settlement_plan": decision["settlement_plan"],
+        "verification_plan": decision["verification_plan"],
+        "security_policy": decision["security_policy"],
+        "selected_agents": decision["selected_agents"],
+        "evidence_ids": decision["evidence_ids"],
+        "same_operator_disclosures": decision["same_operator_disclosures"],
+    }
+
+
+def decision_hash_for(decision: dict) -> str:
+    return sha256_hex_bytes(canonical_json_bytes(substantive_decision_content(decision)))
+
+
+def decision_id_for_hash(decision_hash: str) -> str:
+    return f"frd1-{decision_hash[:24]}"
+
+
+def unsigned_receipt_for_signing(decision: dict) -> dict:
+    return {key: value for key, value in decision.items() if key != "signature"}
+
+
+def routing_decision_signature_payload(decision: dict) -> bytes:
+    return canonical_json_bytes(unsigned_receipt_for_signing(decision))
+
+
+def evidence_ids_for_selected_agents(profiles: dict[str, AgentProfile], selected_agents: list[str]) -> list[str]:
+    evidence_ids: set[str] = set()
+    for did in selected_agents:
+        profile = profiles.get(did)
+        if not profile:
+            continue
+        for capability in profile.capabilities:
+            for item in capability.evidence_items:
+                if item.evidence_id:
+                    evidence_ids.add(item.evidence_id)
+                else:
+                    evidence_ids.add(item.sequence_id)
+        for validated in profile.validated_capability_evidence.values():
+            for item in validated:
+                evidence_ids.add(item.validation_provenance)
+    return sorted(evidence_ids)
+
+
+def build_routing_decision(
+    task_text: str,
+    plan: ExecutionPlan,
+    *,
+    router_did: str = ROUTER_DID,
+    created_at: str | None = None,
+    evidence_ids: list[str] | None = None,
+    same_operator: dict | None = None,
+    task_disclosure: str = "hash_only",
+) -> dict:
+    if task_disclosure not in {"full", "hash_only"}:
+        raise SystemExit("task_disclosure must be full or hash_only.")
+    selected_agents = []
+    worker_did = plan.worker.get("did")
+    if worker_did and worker_did != "none":
+        selected_agents.append(worker_did)
+    decision = {
+        "schema": "flop-routing-decision/v1",
+        "decision_id": "",
+        "router_did": router_did,
+        "created_at": created_at or now_iso(),
+        "task_disclosure": task_disclosure,
+        "task": task_text if task_disclosure == "full" else None,
+        "task_hash": task_hash(task_text),
+        "work_route": dict(plan.worker),
+        "settlement_plan": dict(plan.settlement_plan),
+        "verification_plan": dict(plan.verification_plan),
+        "security_policy": dict(plan.security_policy),
+        "selected_agents": selected_agents,
+        "evidence_ids": sorted(evidence_ids or []),
+        "same_operator_disclosures": same_operator or same_operator_disclosures(),
+        "authenticity_scope": {
+            "signature_proves": [
+                "Router authored the receipt",
+                "Receipt contents were not altered after signing",
+            ],
+            "signature_does_not_prove": [
+                "selected agents are actually capable",
+                "evidence is true",
+                "routing decision was optimal",
+                "work was successfully completed",
+                "settlement succeeded",
+            ],
+        },
+        "decision_hash": "",
+        "signature": None,
+    }
+    digest = decision_hash_for(decision)
+    decision["decision_hash"] = digest
+    decision["decision_id"] = decision_id_for_hash(digest)
+    return decision
+
+
+def write_decision_artifact(decision: dict, output_path: Path | None = None) -> Path:
+    path = output_path
+    if path is None:
+        directory = validate_router_state_dir(DEFAULT_DECISION_DIR)
+        directory.mkdir(parents=True, exist_ok=True)
+        set_private_dir_permissions(directory)
+        path = directory / f"{decision['decision_id']}.json"
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def load_decision_artifact(path: Path) -> dict:
+    data = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit("Routing decision artifact is malformed.")
+    return data
+
+
+def sign_routing_decision(decision: dict, state_dir: Path = DEFAULT_ROUTER_STATE_DIR, *, passphrase: bytes | None = None) -> dict:
+    private_key, metadata = load_router_private_key_for_signing(state_dir, passphrase=passphrase)
+    router_did = metadata.get("did")
+    if decision.get("router_did") != router_did:
+        raise SystemExit("Routing decision router_did does not match Router identity.")
+    expected_hash = decision_hash_for(decision)
+    if decision.get("decision_hash") != expected_hash:
+        raise SystemExit("Routing decision hash mismatch; refusing to sign.")
+    if decision.get("decision_id") != decision_id_for_hash(expected_hash):
+        raise SystemExit("Routing decision ID mismatch; refusing to sign.")
+    unsigned = dict(decision)
+    unsigned["signature"] = None
+    signature = base64.urlsafe_b64encode(private_key.sign(routing_decision_signature_payload(unsigned))).decode("ascii").rstrip("=")
+    signed = dict(unsigned)
+    signed["signature"] = {
+        "algorithm": "Ed25519",
+        "encoding": "base64url-no-padding",
+        "signer_did": router_did,
+        "value": signature,
+    }
+    return signed
+
+
+def verify_routing_decision(decision: dict) -> dict:
+    errors = []
+    if decision.get("schema") != "flop-routing-decision/v1":
+        errors.append("schema is not flop-routing-decision/v1")
+    task_disclosure = decision.get("task_disclosure", "full" if decision.get("task") is not None else "hash_only")
+    if task_disclosure == "full":
+        if decision.get("task") is None:
+            errors.append("task_disclosure full requires task content")
+        elif decision.get("task_hash") != task_hash(str(decision.get("task"))):
+            errors.append("task_hash does not match task")
+        task_binding = "VERIFIED_FROM_CONTENT"
+    elif task_disclosure == "hash_only":
+        task_binding = "HASH_ONLY"
+    else:
+        errors.append("task_disclosure must be full or hash_only")
+        task_binding = "UNKNOWN"
+    expected_hash = decision_hash_for(decision)
+    if decision.get("decision_hash") != expected_hash:
+        errors.append("decision_hash mismatch")
+    if decision.get("decision_id") != decision_id_for_hash(expected_hash):
+        errors.append("decision_id mismatch")
+    signature = decision.get("signature")
+    if not signature:
+        return {"authenticity": "UNSIGNED", "task_binding": task_binding, "valid": False, "errors": [*errors, "signature missing"]}
+    if signature.get("signer_did") != decision.get("router_did"):
+        errors.append("signature signer_did does not match router_did")
+    if decision.get("router_did") != ROUTER_DID:
+        errors.append("router_did is not the configured FLOP Router DID")
+    if signature.get("algorithm") != "Ed25519":
+        errors.append("signature algorithm is not Ed25519")
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        public_key = Ed25519PublicKey.from_public_bytes(did_key_to_ed25519_public_key_bytes(str(decision.get("router_did", ""))))
+        unsigned = dict(decision)
+        unsigned["signature"] = None
+        public_key.verify(base64url_decode_unpadded(signature.get("value", "")), routing_decision_signature_payload(unsigned))
+    except InvalidSignature:
+        errors.append("signature verification failed")
+    except Exception as exc:
+        errors.append(f"signature could not be verified: {exc}")
+    if errors:
+        return {"authenticity": "INVALID_SIGNATURE", "task_binding": task_binding, "valid": False, "errors": errors}
+    return {
+        "authenticity": "VERIFIED_OFFLINE",
+        "task_binding": task_binding,
+        "valid": True,
+        "errors": [],
+        "decision_id": decision["decision_id"],
+        "decision_hash": decision["decision_hash"],
+        "router_did": decision["router_did"],
+    }
+
+
+def print_decision_summary(decision: dict) -> None:
+    print("Routing decision")
+    print("----------------")
+    print(f"schema: {decision.get('schema')}")
+    print(f"decision_id: {decision.get('decision_id')}")
+    print(f"router_did: {decision.get('router_did')}")
+    print(f"created_at: {decision.get('created_at')}")
+    print(f"task_disclosure: {decision.get('task_disclosure', 'full' if decision.get('task') is not None else 'hash_only')}")
+    print(f"task_content_available: {'YES' if decision.get('task') is not None else 'NO'}")
+    print(f"task_hash: {decision.get('task_hash')}")
+    print(f"decision_hash: {decision.get('decision_hash')}")
+    print(f"selected_agents: {', '.join(decision.get('selected_agents') or []) or 'none'}")
+    print(f"evidence_ids: {len(decision.get('evidence_ids') or [])}")
+    print(f"signature_present: {'YES' if decision.get('signature') else 'NO'}")
+    print("private_key_accessed: NO")
+    print("\nSignature proves authorship and integrity only; it does not prove correctness, capability, work quality, or settlement success.")
+
+
+def print_decision_verification(result: dict) -> None:
+    print("Routing decision verification")
+    print("-----------------------------")
+    print(f"AUTHENTICITY: {result['authenticity']}")
+    print(f"TASK_BINDING: {result.get('task_binding', 'UNKNOWN')}")
+    print("ROUTING_CORRECTNESS: NOT_ESTABLISHED_BY_SIGNATURE")
+    print(f"valid: {str(result['valid']).upper()}")
+    if result.get("decision_id"):
+        print(f"decision_id: {result['decision_id']}")
+    if result.get("decision_hash"):
+        print(f"decision_hash: {result['decision_hash']}")
+    print("\nA valid Router signature proves authorship and integrity only.")
+    if result["errors"]:
+        print("Errors:")
+        for error in result["errors"]:
+            print(f"- {error}")
 
 
 def observation_message_hash(room: str, generation: str, seq: int, did: str, nonce: str | None, sig: str | None, text: str) -> str:
@@ -4061,6 +4577,42 @@ def main() -> None:
     verification_report.add_argument("--scout-preview", required=True, type=Path)
     verification_report.add_argument("--bench-result", required=True, type=Path)
     verification_report.add_argument("--scout-normalized", required=True, type=Path)
+    technocore = sub.add_parser("technocore")
+    technocore_sub = technocore.add_subparsers(dest="technocore_command", required=True)
+    technocore_sub.add_parser("status")
+    technocore_claim = technocore_sub.add_parser("claim-room")
+    technocore_claim.add_argument("room")
+    technocore_post = technocore_sub.add_parser("post")
+    technocore_post.add_argument("room")
+    technocore_post.add_argument("text")
+    technocore_profile = technocore_sub.add_parser("profile-message")
+    technocore_profile.add_argument("--preview", action="store_true", default=True)
+    decision = sub.add_parser("decision")
+    decision_sub = decision.add_subparsers(dest="decision_command", required=True)
+    decision_create = decision_sub.add_parser("create")
+    decision_create.add_argument("task")
+    decision_create.add_argument("--output", type=Path)
+    decision_create.add_argument("--fixture", type=Path)
+    decision_create.add_argument("--task-disclosure", choices=("hash_only", "full"), default="hash_only")
+    decision_create.add_argument("--asset")
+    decision_create.add_argument("--max-amount", type=int)
+    decision_create.add_argument("--allowed-rails", default="")
+    decision_create.add_argument("--allowed-lock-types", default="")
+    decision_create.add_argument("--deadline")
+    decision_create.add_argument("--minimum-claim-window")
+    decision_create.add_argument("--verification-required", action="store_true", default=True)
+    decision_create.add_argument("--verification-mode", default="OBJECTIVE_BENCH")
+    decision_create.add_argument("--arbitration-required", action="store_true")
+    decision_create.add_argument("--job-proto")
+    decision_create.add_argument("--job-id")
+    decision_create.add_argument("--min-independent-operator-groups", type=int, default=1)
+    decision_sign = decision_sub.add_parser("sign")
+    decision_sign.add_argument("input", type=Path)
+    decision_sign.add_argument("--output", type=Path)
+    decision_verify = decision_sub.add_parser("verify")
+    decision_verify.add_argument("input", type=Path)
+    decision_show = decision_sub.add_parser("show")
+    decision_show.add_argument("input", type=Path)
     identity = sub.add_parser("identity")
     identity_sub = identity.add_subparsers(dest="identity_command", required=True)
     identity_sub.add_parser("init")
@@ -4172,6 +4724,18 @@ def main() -> None:
             )
             print(json.dumps(report, indent=2, sort_keys=True))
         return
+    if args.command == "technocore":
+        if args.technocore_command == "status":
+            print_technocore_status(technocore_status(state_dir=state_dir))
+        elif args.technocore_command == "claim-room":
+            print_technocore_write_result(claim_technocore_room(args.room, state_dir))
+        elif args.technocore_command == "post":
+            print_technocore_write_result(post_technocore_signed(args.room, args.text, state_dir))
+        elif args.technocore_command == "profile-message":
+            print(router_profile_message())
+            print("network_writes: 0")
+            print("private_key_accessed: NO")
+        return
     if args.command == "identity":
         if args.identity_command == "init":
             metadata = create_router_identity(state_dir)
@@ -4196,6 +4760,62 @@ def main() -> None:
                 print(f"{key}: {metadata.get(key)}")
             print("private_key_accessed: NO")
             print("network writes: 0")
+        return
+    if args.command == "decision":
+        if args.decision_command == "create":
+            constraints = ExecutionConstraints(
+                asset=args.asset,
+                max_amount=args.max_amount,
+                allowed_rails=[item for item in args.allowed_rails.split(",") if item],
+                allowed_lock_types=[item for item in args.allowed_lock_types.split(",") if item],
+                deadline=args.deadline,
+                minimum_claim_window=args.minimum_claim_window,
+                verification_required=args.verification_required,
+                verification_mode=args.verification_mode,
+                arbitration_required=args.arbitration_required,
+                job_proto=args.job_proto,
+                job_id=args.job_id,
+                min_independent_operator_groups=args.min_independent_operator_groups,
+            )
+            if args.fixture is not None:
+                observations = [obs for obs in load_fixture_observations(args.fixture) if DID_RE.match(obs.identity.did)]
+                settlement_evidence = settlement_evidence_from_tclk(TclkObservationAdapter(tclk_store).observations())
+                profiles_for_decision = ProfileBuilder(observations, [], [], settlement_evidence).build_all()
+            else:
+                profiles_for_decision = load_profiles(db_path, validation_store, ingest_store, tclk_store)
+            plan = create_execution_plan(args.task, profiles_for_decision, constraints)
+            selected_agents = [plan.worker["did"]] if plan.worker.get("did") and plan.worker.get("did") != "none" else []
+            decision_artifact = build_routing_decision(
+                args.task,
+                plan,
+                router_did=ROUTER_DID,
+                evidence_ids=evidence_ids_for_selected_agents(profiles_for_decision, selected_agents),
+                task_disclosure=args.task_disclosure,
+            )
+            output_path = write_decision_artifact(decision_artifact, args.output)
+            print(f"Routing decision created: {output_path}")
+            print(f"decision_id: {decision_artifact['decision_id']}")
+            print(f"decision_hash: {decision_artifact['decision_hash']}")
+            print("signature_present: NO")
+            print("private_key_accessed: NO")
+            print("network writes: 0")
+        elif args.decision_command == "sign":
+            decision_artifact = load_decision_artifact(args.input)
+            signed = sign_routing_decision(decision_artifact, state_dir)
+            output_path = args.output or args.input
+            write_decision_artifact(signed, output_path)
+            print(f"Routing decision signed: {output_path}")
+            print(f"decision_id: {signed['decision_id']}")
+            print(f"decision_hash: {signed['decision_hash']}")
+            print("signature_present: YES")
+            print("network writes: 0")
+        elif args.decision_command == "verify":
+            result = verify_routing_decision(load_decision_artifact(args.input))
+            print_decision_verification(result)
+            if not result["valid"]:
+                raise SystemExit(1)
+        elif args.decision_command == "show":
+            print_decision_summary(load_decision_artifact(args.input))
         return
     if args.command == "ingest-export":
         total, added, digest = ingest_export(Path(args.jsonl), Path(args.manifest), ingest_store)

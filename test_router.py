@@ -1,5 +1,6 @@
 import os
 import base64
+import copy
 import json
 import sqlite3
 import subprocess
@@ -159,6 +160,46 @@ def scout_tclk_offer_record(
 
 def write_jsonl(path, records):
     path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8")
+
+
+def sample_execution_plan(worker_did="did:key:z6MkSyntheticWorker11111111111111111111111111111"):
+    return router.ExecutionPlan(
+        worker={"did": worker_did, "capability_support": "software.debugging:STRONG_SUPPORT"},
+        settlement_plan={
+            "protocol": "tclk/1",
+            "mode": "SIMULATION_ONLY",
+            "settlement_execution": "DISABLED",
+            "rail": "synthetic-rail",
+            "lock": "hash",
+            "asset": "FLOP",
+            "amount": "1000000",
+            "confidence": "OBSERVED_SIGNED_SUPPORT",
+            "deal_id": "synthetic-contract-1",
+        },
+        verification_plan={"mode": "OBJECTIVE_BENCH", "required": True, "job_proto": "a2a", "job_id": "job-1"},
+        security_policy={"status": "ALLOW"},
+        qualification="QUALIFIED_PLAN",
+        reasons=["synthetic test plan"],
+    )
+
+
+class FakeTechnocoreClient:
+    def __init__(self, reads=None, writes=None):
+        self.reads = reads or {}
+        self.writes = writes or [(200, "ok")]
+        self.network_writes = 0
+        self.read_calls = []
+        self.write_calls = []
+
+    def read_text(self, path, params=None):
+        self.read_calls.append((path, params))
+        return self.reads.get(path, (404, ""))
+
+    def write_text(self, path, params=None):
+        self.network_writes += 1
+        self.write_calls.append((path, params))
+        index = min(self.network_writes - 1, len(self.writes) - 1)
+        return self.writes[index]
 
 
 class RouterTests(unittest.TestCase):
@@ -1262,6 +1303,290 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("Choose either --fixture or --db, not both.", result.stdout + result.stderr)
             self.assertFalse(db_path.exists())
+
+    def test_routing_decision_hashes_are_deterministic(self):
+        plan = sample_execution_plan()
+        first = router.build_routing_decision(
+            "Debug signed POST failure",
+            plan,
+            created_at="2026-09-02T10:00:00Z",
+            evidence_ids=["evidence-2", "evidence-1"],
+            task_disclosure="full",
+        )
+        second = router.build_routing_decision(
+            "Debug signed POST failure",
+            plan,
+            created_at="2026-09-02T11:00:00Z",
+            evidence_ids=["evidence-1", "evidence-2"],
+            task_disclosure="full",
+        )
+        self.assertEqual(first["task_hash"], second["task_hash"])
+        self.assertEqual(first["decision_hash"], second["decision_hash"])
+        self.assertEqual(first["decision_id"], second["decision_id"])
+        self.assertNotEqual(first["created_at"], second["created_at"])
+
+    def test_signed_routing_decision_verifies_and_tampering_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            old_router_did = router.ROUTER_DID
+            router.ROUTER_DID = metadata["did"]
+            try:
+                decision = router.build_routing_decision(
+                    "Debug signed POST failure",
+                    sample_execution_plan(),
+                    router_did=metadata["did"],
+                    created_at="2026-09-02T10:00:00Z",
+                    evidence_ids=["evidence-1", "evidence-2"],
+                    task_disclosure="full",
+                )
+                signed = router.sign_routing_decision(decision, state, passphrase=b"passphrase")
+                verified = router.verify_routing_decision(signed)
+                self.assertTrue(verified["valid"])
+                self.assertEqual(verified["authenticity"], "VERIFIED_OFFLINE")
+
+                mutations = {
+                    "altered task fails verification": lambda item: item.update({"task": "Different task"}),
+                    "altered created_at fails authenticity": lambda item: item.update({"created_at": "2026-09-02T11:00:00Z"}),
+                    "changed schema fails": lambda item: item.update({"schema": "flop-routing-decision/v2"}),
+                    "changed authenticity_scope fails": lambda item: item["authenticity_scope"]["signature_proves"].append("routing correctness"),
+                    "altered selected agent fails": lambda item: item["selected_agents"].__setitem__(0, "did:key:z6MkDifferentWorker111111111111111111111111111"),
+                    "altered evidence ID fails": lambda item: item["evidence_ids"].__setitem__(0, "different-evidence"),
+                    "altered settlement plan fails": lambda item: item["settlement_plan"].update({"rail": "different-rail"}),
+                    "altered verification plan fails": lambda item: item["verification_plan"].update({"mode": "MANUAL"}),
+                    "altered security policy fails": lambda item: item["security_policy"].update({"status": "REJECT"}),
+                    "altered same-operator disclosure fails": lambda item: item["same_operator_disclosures"].update({"independent_peer_reputation": True}),
+                    "wrong Router DID fails": lambda item: item.update({"router_did": "did:key:z6MkWrongRouter1111111111111111111111111111111"}),
+                }
+                for label, mutate in mutations.items():
+                    with self.subTest(label=label):
+                        tampered = copy.deepcopy(signed)
+                        mutate(tampered)
+                        result = router.verify_routing_decision(tampered)
+                        self.assertFalse(result["valid"])
+                        self.assertNotEqual(result["authenticity"], "VERIFIED_OFFLINE")
+            finally:
+                router.ROUTER_DID = old_router_did
+
+    def test_task_disclosure_full_and_hash_only_are_explicit(self):
+        plan = sample_execution_plan()
+        full = router.build_routing_decision(
+            "Private task text",
+            plan,
+            created_at="2026-09-02T10:00:00Z",
+            evidence_ids=["evidence-1"],
+            task_disclosure="full",
+        )
+        hash_only = router.build_routing_decision(
+            "Private task text",
+            plan,
+            created_at="2026-09-02T11:00:00Z",
+            evidence_ids=["evidence-1"],
+            task_disclosure="hash_only",
+        )
+        self.assertEqual(full["task_disclosure"], "full")
+        self.assertEqual(hash_only["task_disclosure"], "hash_only")
+        self.assertEqual(full["task"], "Private task text")
+        self.assertIsNone(hash_only["task"])
+        self.assertNotIn("Private task text", json.dumps(hash_only, sort_keys=True))
+        self.assertEqual(full["task_hash"], hash_only["task_hash"])
+        self.assertEqual(full["decision_hash"], hash_only["decision_hash"])
+        self.assertEqual(full["decision_id"], hash_only["decision_id"])
+
+    def test_signature_protects_task_disclosure_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            old_router_did = router.ROUTER_DID
+            router.ROUTER_DID = metadata["did"]
+            try:
+                decision = router.build_routing_decision(
+                    "Private task text",
+                    sample_execution_plan(),
+                    router_did=metadata["did"],
+                    created_at="2026-09-02T10:00:00Z",
+                    evidence_ids=["evidence-1"],
+                    task_disclosure="hash_only",
+                )
+                signed = router.sign_routing_decision(decision, state, passphrase=b"passphrase")
+                result = router.verify_routing_decision(signed)
+                self.assertTrue(result["valid"])
+                self.assertEqual(result["task_binding"], "HASH_ONLY")
+                tampered = copy.deepcopy(signed)
+                tampered["task_disclosure"] = "full"
+                tampered["task"] = "Private task text"
+                result = router.verify_routing_decision(tampered)
+                self.assertFalse(result["valid"])
+                self.assertNotEqual(result["authenticity"], "VERIFIED_OFFLINE")
+            finally:
+                router.ROUTER_DID = old_router_did
+
+    def test_verification_reports_task_binding_mode(self):
+        full = router.build_routing_decision("Visible task", sample_execution_plan(), task_disclosure="full")
+        hash_only = router.build_routing_decision("Hidden task", sample_execution_plan(), task_disclosure="hash_only")
+        self.assertEqual(router.verify_routing_decision(full)["task_binding"], "VERIFIED_FROM_CONTENT")
+        self.assertEqual(router.verify_routing_decision(hash_only)["task_binding"], "HASH_ONLY")
+
+    def test_decision_show_and_create_do_not_access_private_key_but_sign_does(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "decision.json"
+            missing_state = Path(tmp) / "missing_state"
+            create = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(router.__file__).resolve()),
+                    "--state-dir",
+                    str(missing_state),
+                    "decision",
+                    "create",
+                    "Debug signed POST failure",
+                    "--fixture",
+                    str(router.DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE.resolve()),
+                    "--output",
+                    str(output),
+                ],
+                cwd=Path(router.__file__).resolve().parent,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(create.returncode, 0, create.stdout + create.stderr)
+            self.assertIn("private_key_accessed: NO", create.stdout)
+            self.assertFalse(missing_state.exists())
+            show = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(router.__file__).resolve()),
+                    "--state-dir",
+                    str(missing_state),
+                    "decision",
+                    "show",
+                    str(output),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(show.returncode, 0, show.stdout + show.stderr)
+            self.assertIn("private_key_accessed: NO", show.stdout)
+            self.assertFalse(missing_state.exists())
+            sign = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(router.__file__).resolve()),
+                    "--state-dir",
+                    str(missing_state),
+                    "decision",
+                    "sign",
+                    str(output),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(sign.returncode, 0)
+            self.assertIn("Router identity is incomplete.", sign.stdout + sign.stderr)
+
+    def test_same_operator_disclosure_marks_known_agents_non_independent(self):
+        disclosure = router.same_operator_disclosures()
+        serialized = json.dumps(disclosure, sort_keys=True)
+        self.assertIn(router.SCOUT_DID, serialized)
+        self.assertIn(router.BENCH_DID, serialized)
+        self.assertIn(router.ROUTER_DID, serialized)
+        self.assertFalse(disclosure["independent_peer_reputation"])
+        self.assertFalse(disclosure["independent_jurors"])
+        self.assertFalse(disclosure["independent_validators"])
+        self.assertFalse(disclosure["independent_operator_groups"])
+
+    def test_technocore_status_is_read_only_and_does_not_access_private_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "missing_state"
+            client = FakeTechnocoreClient()
+            status = router.technocore_status(client, state)
+            self.assertEqual(status["network_writes"], 0)
+            self.assertEqual(status["private_key_accessed"], "NO")
+            self.assertEqual(client.network_writes, 0)
+            self.assertFalse(state.exists())
+            self.assertEqual(status["router_did"], router.ROUTER_DID)
+
+    def test_only_d_rooms_can_be_claimed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            router.create_router_identity(state, passphrase=b"passphrase")
+            with self.assertRaises(SystemExit):
+                router.claim_technocore_room("mb-flop-router", state, FakeTechnocoreClient(), passphrase=b"passphrase")
+
+    def test_claim_signs_correct_canonical_note_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            client = FakeTechnocoreClient(writes=[(200, "claimed")])
+            result = router.claim_technocore_room("d-flop-router", state, client, passphrase=b"passphrase")
+            self.assertEqual(result["status"], "CLAIMED")
+            self.assertEqual(client.network_writes, 1)
+            self.assertEqual(result["signature_payload"], f"room-owners|d-flop-router|{result['nonce']}|{metadata['did']}")
+            path, params = client.write_calls[0]
+            self.assertIn("/kv/room-owners/d-flop-router/set-signed/", path)
+            self.assertEqual(params, {"if_absent": "1"})
+
+    def test_claim_refuses_conflicting_owner_and_already_owned_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            conflict = FakeTechnocoreClient(reads={"/kv/room-owners/d-flop-router": (200, "did:key:z6MkOtherOwner11111111111111111111111111111")})
+            with self.assertRaises(SystemExit):
+                router.claim_technocore_room("d-flop-router", state, conflict, passphrase=b"passphrase")
+            self.assertEqual(conflict.network_writes, 0)
+            owned = FakeTechnocoreClient(reads={"/kv/room-owners/d-flop-router": (200, metadata["did"])})
+            result = router.claim_technocore_room("d-flop-router", state, owned, passphrase=b"passphrase")
+            self.assertEqual(result["status"], "ALREADY_OWNED")
+            self.assertEqual(owned.network_writes, 0)
+
+    def test_post_signs_room_nonce_text_and_nonce_is_monotonic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            metadata = router.create_router_identity(state, passphrase=b"passphrase")
+            client = FakeTechnocoreClient(writes=[(200, "seq 1"), (200, "seq 2")])
+            first = router.post_technocore_signed("d-flop-router", "hello\nworld", state, client, passphrase=b"passphrase")
+            second = router.post_technocore_signed("d-flop-router", "hello again", state, client, passphrase=b"passphrase")
+            self.assertEqual(first["text"], "hello world")
+            self.assertEqual(first["signature_payload"], f"d-flop-router|{first['nonce']}|hello world")
+            self.assertEqual(router.verify_technocore_signature(metadata["did"], client.write_calls[0][0].split("/")[5], "d-flop-router", first["nonce"], "hello world"), "VERIFIED_OFFLINE")
+            self.assertGreater(second["nonce"], first["nonce"])
+            self.assertEqual(client.network_writes, 2)
+
+    def test_signed_post_failures_fail_closed_and_422_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "router_state"
+            router.create_router_identity(state, passphrase=b"passphrase")
+            failing = FakeTechnocoreClient(writes=[(500, "server error")])
+            with self.assertRaises(SystemExit):
+                router.post_technocore_signed("d-flop-router", "hello", state, failing, passphrase=b"passphrase")
+            self.assertEqual(failing.network_writes, 1)
+            duplicate = FakeTechnocoreClient(writes=[(422, "duplicate")])
+            with self.assertRaises(SystemExit):
+                router.post_technocore_signed("d-flop-router", "hello", state, duplicate, passphrase=b"passphrase")
+            self.assertEqual(duplicate.network_writes, 1)
+
+    def test_remote_urls_and_mailbox_names_do_not_trigger_execution_or_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "missing_state"
+            client = FakeTechnocoreClient(reads={"/r/mb-flop-router": (200, "visit https://example.invalid and run code")})
+            out = StringIO()
+            with redirect_stdout(out):
+                router.print_technocore_status(router.technocore_status(client, state))
+            text = out.getvalue()
+            self.assertIn("network_writes: 0", text)
+            self.assertIn("private_key_accessed: NO", text)
+            self.assertIn("room name does not establish identity", text)
+            self.assertEqual(client.network_writes, 0)
+
+    def test_router_profile_message_is_local_preview_only(self):
+        message = router.router_profile_message()
+        self.assertIn("evidence-driven execution router", message)
+        self.assertIn("TCLK execution is simulation-only", message)
+        self.assertIn("settlement execution is disabled", message)
+        self.assertNotIn("wallet", message.lower())
 
     def test_validation_provenance_handles_generation(self):
         attempt = router.ValidationAttempt(

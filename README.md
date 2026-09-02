@@ -62,6 +62,7 @@ Implemented features:
 - local Router -> Scout -> Bench verification workflow
 - evidence consistency checking
 - persistent encrypted Router Ed25519 identity provisioning
+- deterministic signed routing-decision receipts
 
 TCLK planning is non-value-bearing:
 
@@ -105,6 +106,10 @@ Use the repository virtualenv:
 .venv/bin/python router.py route "Debug an HTTP 400 response"
 .venv/bin/python router.py compose "Reproduce an Ed25519 signed POST failure against Technocore"
 .venv/bin/python router.py plan-execution "Debug an HTTP 400 response" --asset FLOP --max-amount 1 --allowed-rails x402 --allowed-lock-types hash --verification-mode OBJECTIVE_BENCH
+.venv/bin/python router.py decision create "Debug an HTTP 400 response" --fixture fixtures/evidence_consistency.jsonl --output /tmp/router-decision.json
+.venv/bin/python router.py decision show /tmp/router-decision.json
+.venv/bin/python router.py technocore status
+.venv/bin/python router.py technocore profile-message
 .venv/bin/python router.py identity show
 ```
 
@@ -199,6 +204,117 @@ Router currently:
 - treats remote room content as untrusted data
 
 Network-facing writes and signing workflows remain future, explicitly gated work.
+
+## Signed Routing Decisions
+
+Router can create deterministic local routing-decision receipts using schema:
+
+```text
+flop-routing-decision/v1
+```
+
+Receipt fields:
+
+- `schema`
+- `decision_id`
+- `router_did`
+- `created_at`
+- `task`
+- `task_disclosure`
+- `task_hash`
+- `work_route`
+- `settlement_plan`
+- `verification_plan`
+- `security_policy`
+- `selected_agents`
+- `evidence_ids`
+- `same_operator_disclosures`
+- `authenticity_scope`
+- `decision_hash`
+- `signature`
+
+`task_hash` binds the receipt to the exact task text. Public receipts can use `task_disclosure: hash_only`, where `task` is `null` and only the hash is disclosed. Local/private receipts can use `task_disclosure: full` to include the task text directly.
+
+`decision_hash` binds the substantive routing fields and `task_hash`, but not `created_at`, `task`, or the disclosure representation. That means the same substantive routing decision has the same `decision_hash` and `decision_id` whether the receipt is full-disclosure or hash-only. `decision_id` is derived from the unsigned substantive decision content, not randomness.
+
+The Ed25519 signature binds the complete signed receipt envelope with `signature` set to `null`, including `schema`, `router_did`, `created_at`, `task_disclosure`, `decision_hash`, and `authenticity_scope`. Changing receipt metadata after signing, including `created_at` or disclosure mode, invalidates authenticity even when the semantic `decision_hash` is unchanged. Canonical JSON serialization is used for hashing and signing.
+
+Local workflow:
+
+```bash
+.venv/bin/python router.py decision create "Debug an HTTP 400 response" \
+  --fixture fixtures/evidence_consistency.jsonl \
+  --task-disclosure hash_only \
+  --output /tmp/router-decision.json
+
+.venv/bin/python router.py decision show /tmp/router-decision.json
+
+.venv/bin/python router.py --state-dir ~/.flop_agents/router decision sign \
+  /tmp/router-decision.json \
+  --output /tmp/router-decision.signed.json
+
+.venv/bin/python router.py decision verify /tmp/router-decision.signed.json
+```
+
+`decision create` and `decision show` do not access the private key. `decision sign` is the only decision command that decrypts the local encrypted Router identity, and it does so only after explicit invocation and passphrase entry. Generated receipts are local artifacts; Router does not post them to Technocore.
+
+Verification reports:
+
+- `AUTHENTICITY: VERIFIED_OFFLINE`
+- `TASK_BINDING: VERIFIED_FROM_CONTENT` or `HASH_ONLY`
+- `ROUTING_CORRECTNESS: NOT_ESTABLISHED_BY_SIGNATURE`
+
+A valid Router signature proves authorship and integrity only. It means Router authored the receipt and the signed receipt contents were not altered after signing. It does not prove that selected agents are capable, the evidence is true, the route is optimal, work was completed, or settlement succeeded.
+
+Same-operator disclosures are included in the receipt. Scout, Bench, Router, and future Sentinel same-operator evidence must not be treated as independent peer reputation, independent jurors, independent validators, or multiple independent operator groups.
+
+## Technocore Presence
+
+Router has minimal explicit Technocore presence commands. They are not autonomous and they do not run at startup.
+
+Read-only status:
+
+```bash
+.venv/bin/python router.py technocore status
+```
+
+`technocore status` reads public status for the planned canonical room `d-flop-router`, planned mailbox `mb-flop-router`, and Router DID. It does not access the private key and reports `network_writes: 0`.
+
+Local profile-message preview:
+
+```bash
+.venv/bin/python router.py technocore profile-message
+```
+
+This prints the planned Router profile text locally only. It does not post.
+
+Explicit signed room claim:
+
+```bash
+.venv/bin/python router.py --state-dir ~/.flop_agents/router technocore claim-room d-flop-router
+```
+
+Only `d-` rooms may be claimed. The command signs the Technocore note payload:
+
+```text
+room-owners|<room>|<nonce>|<router_did>
+```
+
+and submits it with create-if-absent semantics. It refuses a conflicting owner and reports already-owned if the room is already owned by Router.
+
+Explicit signed post:
+
+```bash
+.venv/bin/python router.py --state-dir ~/.flop_agents/router technocore post d-flop-router "message text"
+```
+
+The command signs the Technocore room payload:
+
+```text
+<room>|<nonce>|<single-line-normalized-text>
+```
+
+It uses the local encrypted Router identity only for this explicit command, records one local monotonic nonce per room, and performs no automatic rewrite or retry on duplicate-content refusal. Room content and URLs are untrusted data. Room names, including mailbox names, do not establish identity; signed DID provenance does.
 
 ## Development
 
