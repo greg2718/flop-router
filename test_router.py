@@ -2381,6 +2381,117 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(classification["evidence_class"], "NOT_POSITIVE_CAPABILITY_EVIDENCE")
         self.assertEqual(classification["capability_support"], [])
 
+    def test_network_backed_scout_result_is_positive_controlled_evidence(self):
+        normalized = {
+            "schema_version": "flop-scout.normalized-verification-result/v1",
+            "request_id": "FVR-live",
+            "routing_decision_id": "frd1-live",
+            "routing_decision_hash": "d" * 64,
+            "task_hash": "t" * 64,
+            "verification_mode": "OBJECTIVE_BENCH",
+            "authenticity": "VERIFIED_OFFLINE",
+            "correctness": "PASS",
+            "reproducibility": "DETERMINISTIC",
+            "same_operator": True,
+            "independent_reputation": False,
+            "operator_group": router.ROUTER_OPERATOR_GROUP,
+            "request_linkage": {"valid": True, "matches": {"request_id": True, "task_hash": True}},
+            "bench_result": {
+                "request_id": "FVR-live",
+                "routing_decision_id": "frd1-live",
+                "routing_decision_hash": "d" * 64,
+                "task_hash": "t" * 64,
+                "verification_mode": "OBJECTIVE_BENCH",
+                "bench_did": router.BENCH_DID,
+                "result_hash": "r" * 64,
+                "status": "PASS",
+                "reproducibility": "DETERMINISTIC",
+                "same_operator": True,
+                "independent_reputation": False,
+                "operator_group": router.ROUTER_OPERATOR_GROUP,
+                "evidence_classification": "CONTROLLED_SAME_OPERATOR_VALIDATION",
+                "checks": {"broken_payload_detected": True, "correct_reconstruction_identified": True},
+            },
+            "classification": {"AUTHENTICITY": "VERIFIED_OFFLINE", "CORRECTNESS": "PASS", "REPRODUCIBILITY": "DETERMINISTIC"},
+            "transport_provenance": {"room": "mb-flop-scout", "generation": "g1", "seq": 4, "sender_did": router.BENCH_DID, "signature_verification": "VERIFIED_OFFLINE"},
+        }
+        classification = router.classify_normalized_bench_result(normalized)
+        self.assertEqual(classification["evidence_class"], "CONTROLLED_SAME_OPERATOR_VALIDATION")
+        self.assertEqual(classification["capability_support"], ["software.testing", "verification"])
+        self.assertEqual(classification["authenticity"], "VERIFIED_OFFLINE")
+        self.assertEqual(classification["transport_provenance"]["seq"], 4)
+
+    def test_network_result_contradictions_and_invalid_linkage_fail_closed(self):
+        normalized = {
+            "request_id": "FVR-conflict", "correctness": "PASS", "same_operator": True,
+            "independent_reputation": False, "authenticity": "VERIFIED_OFFLINE",
+            "bench_result": {"status": "FAIL", "checks": {"broken_payload_detected": True, "correct_reconstruction_identified": True}},
+        }
+        classification = router.classify_normalized_bench_result(normalized)
+        self.assertEqual(classification["capability_support"], [])
+        self.assertTrue(classification["validation_errors"])
+        normalized["bench_result"]["status"] = "PASS"
+        normalized["request_linkage"] = {"valid": False}
+        classification = router.classify_normalized_bench_result(normalized)
+        self.assertEqual(classification["capability_support"], [])
+        self.assertIn("request_linkage_valid is not true", classification["validation_errors"])
+        normalized["request_linkage"] = {"valid": True, "matches": {"routing_decision_hash": False}}
+        normalized["routing_decision_hash"] = "a" * 64
+        normalized["bench_result"]["routing_decision_hash"] = "b" * 64
+        classification = router.classify_normalized_bench_result(normalized)
+        self.assertEqual(classification["capability_support"], [])
+        self.assertTrue(classification["validation_errors"])
+
+    def test_local_then_live_ingest_upgrades_one_logical_evidence_record(self):
+        local = {
+            "schema_version": "flop-scout.normalized-verification-result/v1", "request_id": "FVR-upgrade",
+            "authenticity": "UNSIGNED_LOCAL", "correctness": "PASS", "reproducibility": "DETERMINISTIC",
+            "same_operator": True, "independent_reputation": False, "bench_result": {
+                "bench_did": router.BENCH_DID, "result_hash": "r" * 64, "status": "PASS",
+                "reproducibility": "DETERMINISTIC", "evidence_classification": "CONTROLLED_SAME_OPERATOR_VALIDATION",
+                "checks": {"broken_payload_detected": True, "correct_reconstruction_identified": True},
+            },
+        }
+        live = copy.deepcopy(local)
+        live["authenticity"] = "VERIFIED_OFFLINE"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); local_path = base / "local.json"; live_path = base / "live.json"; store = base / "evidence.jsonl"
+            router.write_json_artifact(local_path, local); router.write_json_artifact(live_path, live)
+            first = router.ingest_normalized_bench_result(local_path, store)
+            second = router.ingest_normalized_bench_result(live_path, store)
+            third = router.ingest_normalized_bench_result(live_path, store)
+            records = [json.loads(line) for line in store.read_text().splitlines() if line.strip()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(first["classification"]["authenticity"], "UNSIGNED_LOCAL")
+        self.assertEqual(second["classification"]["authenticity"], "VERIFIED_OFFLINE")
+        self.assertEqual(second["provenance_update"], "UPGRADED_EXISTING_EVIDENCE")
+        self.assertEqual(third["provenance_update"], "IDEMPOTENT_EXISTING_EVIDENCE")
+
+    def test_ingest_result_hash_mismatch_does_not_upgrade_or_duplicate(self):
+        base_result = {"status": "PASS", "reproducibility": "DETERMINISTIC", "bench_did": router.BENCH_DID, "result_hash": "a" * 64, "evidence_classification": "CONTROLLED_SAME_OPERATOR_VALIDATION", "checks": {"broken_payload_detected": True, "correct_reconstruction_identified": True}}
+        first = {"request_id": "FVR-hash", "authenticity": "UNSIGNED_LOCAL", "correctness": "PASS", "reproducibility": "DETERMINISTIC", "same_operator": True, "independent_reputation": False, "bench_result": base_result}
+        second = copy.deepcopy(first); second["authenticity"] = "VERIFIED_OFFLINE"; second["bench_result"]["result_hash"] = "b" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); first_path = base / "first.json"; second_path = base / "second.json"; store = base / "evidence.jsonl"
+            router.write_json_artifact(first_path, first); router.write_json_artifact(second_path, second)
+            router.ingest_normalized_bench_result(first_path, store)
+            rejected = router.ingest_normalized_bench_result(second_path, store)
+            records = store.read_text().splitlines()
+        self.assertEqual(rejected["ingest_status"], "REJECTED_CONTRADICTION")
+        self.assertEqual(len(records), 1)
+
+    def test_different_request_ids_remain_distinct_evidence(self):
+        def result(request_id):
+            return {"request_id": request_id, "authenticity": "UNSIGNED_LOCAL", "correctness": "PASS", "reproducibility": "DETERMINISTIC", "same_operator": True, "independent_reputation": False, "bench_result": {"bench_did": router.BENCH_DID, "result_hash": "r" * 64, "status": "PASS", "reproducibility": "DETERMINISTIC", "evidence_classification": "CONTROLLED_SAME_OPERATOR_VALIDATION", "checks": {"broken_payload_detected": True, "correct_reconstruction_identified": True}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp); store = base / "evidence.jsonl"
+            for index in (1, 2):
+                path = base / f"{index}.json"
+                router.write_json_artifact(path, result(f"FVR-{index}"))
+                router.ingest_normalized_bench_result(path, store)
+            records = [json.loads(line) for line in store.read_text().splitlines() if line.strip()]
+        self.assertEqual(len(records), 2)
+
     def test_router_lifecycle_report_detects_request_id_and_hashes(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

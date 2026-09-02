@@ -2160,29 +2160,108 @@ def export_signing_verification_request(
     return request
 
 
+def _consistent_normalized_field(errors: list[str], name: str, values: list[object]) -> object | None:
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    if any(value != present[0] for value in present[1:]):
+        errors.append(f"conflicting {name} fields")
+        return None
+    return present[0]
+
+
+def normalize_scout_verification_result(normalized: dict) -> tuple[dict, list[str]]:
+    errors: list[str] = []
+    result = normalized.get("bench_result") if isinstance(normalized.get("bench_result"), dict) else {}
+    delivery = normalized.get("bench_delivery") if isinstance(normalized.get("bench_delivery"), dict) else {}
+    classification = normalized.get("classification") if isinstance(normalized.get("classification"), dict) else {}
+    linkage = normalized.get("request_linkage") if isinstance(normalized.get("request_linkage"), dict) else {}
+
+    fields = {
+        "request_id": _consistent_normalized_field(errors, "request_id", [normalized.get("request_id"), result.get("request_id"), delivery.get("request_id")]),
+        "correctness": _consistent_normalized_field(errors, "correctness", [normalized.get("correctness"), classification.get("CORRECTNESS"), result.get("status"), delivery.get("status")]),
+        "reproducibility": _consistent_normalized_field(errors, "reproducibility", [normalized.get("reproducibility"), classification.get("REPRODUCIBILITY"), result.get("reproducibility"), delivery.get("reproducibility")]),
+        "authenticity": _consistent_normalized_field(errors, "authenticity", [normalized.get("authenticity"), classification.get("AUTHENTICITY")]),
+        "evidence_classification": _consistent_normalized_field(errors, "evidence_classification", [result.get("evidence_classification"), delivery.get("evidence_classification")]),
+        "same_operator": _consistent_normalized_field(errors, "same_operator", [normalized.get("same_operator"), result.get("same_operator"), delivery.get("same_operator")]),
+        "independent_reputation": _consistent_normalized_field(errors, "independent_reputation", [normalized.get("independent_reputation"), result.get("independent_reputation"), delivery.get("independent_reputation")]),
+        "operator_group": _consistent_normalized_field(errors, "operator_group", [normalized.get("operator_group"), result.get("operator_group"), delivery.get("operator_group")]),
+        "bench_did": _consistent_normalized_field(errors, "bench_did", [normalized.get("bench_did"), result.get("bench_did"), delivery.get("bench_did")]),
+        "routing_decision_id": _consistent_normalized_field(errors, "routing_decision_id", [normalized.get("routing_decision_id"), result.get("routing_decision_id"), delivery.get("routing_decision_id")]),
+        "routing_decision_hash": _consistent_normalized_field(errors, "routing_decision_hash", [normalized.get("routing_decision_hash"), result.get("routing_decision_hash"), delivery.get("routing_decision_hash")]),
+        "task_hash": _consistent_normalized_field(errors, "task_hash", [normalized.get("task_hash"), result.get("task_hash"), delivery.get("task_hash")]),
+        "verification_mode": _consistent_normalized_field(errors, "verification_mode", [normalized.get("verification_mode"), result.get("verification_mode"), delivery.get("verification_mode")]),
+        "result_hash": _consistent_normalized_field(errors, "result_hash", [result.get("result_hash"), delivery.get("result_hash")]),
+    }
+    if "request_linkage" in normalized and linkage.get("valid") is not True:
+        errors.append("request_linkage_valid is not true")
+    if isinstance(linkage.get("matches"), dict) and not all(linkage["matches"].values()):
+        errors.append("request linkage field mismatch")
+    if fields["evidence_classification"] not in {None, "CONTROLLED_SAME_OPERATOR_VALIDATION"}:
+        errors.append("unsupported evidence classification")
+    if fields["same_operator"] is not True or fields["independent_reputation"] is not False:
+        errors.append("same-operator disclosure is not safe")
+    if fields["request_id"] is None:
+        errors.append("request_id is required")
+    if fields["bench_did"] is None:
+        # Earlier local Scout results did not repeat the known Bench identity.
+        fields["bench_did"] = BENCH_DID
+    if fields["result_hash"] is None:
+        fields["result_hash"] = canonical_json_hash(result)
+    fields["transport_provenance"] = normalized.get("transport_provenance")
+    fields["request_linkage"] = linkage
+    fields["bench_result"] = result
+    fields["bench_delivery"] = delivery
+    fields["classification"] = classification
+    return fields, errors
+
+
 def classify_normalized_bench_result(normalized: dict) -> dict:
-    result = normalized.get("bench_result", {})
-    same_operator = bool(normalized.get("same_operator"))
-    independent_reputation = bool(normalized.get("independent_reputation"))
-    status = result.get("status")
-    checks = result.get("checks", {})
-    positive = (
-        status == "PASS"
-        and checks.get("broken_payload_detected") is True
+    fields, errors = normalize_scout_verification_result(normalized)
+    result = fields["bench_result"]
+    same_operator = fields["same_operator"] is True
+    independent_reputation = fields["independent_reputation"] is True
+    status = fields["correctness"]
+    checks = result.get("checks", {}) if isinstance(result, dict) else {}
+    transport = fields["transport_provenance"] if isinstance(fields["transport_provenance"], dict) else {}
+    verified_transport_shape = (
+        fields["authenticity"] == "VERIFIED_OFFLINE"
+        and fields["request_linkage"].get("valid") is True
+        and transport.get("signature_verification") == "VERIFIED_OFFLINE"
+        and transport.get("signature_present") is True
+    )
+    checks_pass = (
+        checks.get("broken_payload_detected") is True
         and checks.get("correct_reconstruction_identified") is True
+    )
+    positive = (
+        not errors
+        and status == "PASS"
+        and fields["reproducibility"] == "DETERMINISTIC"
+        and fields["authenticity"] in {"UNSIGNED_LOCAL", "VERIFIED_OFFLINE"}
+        and fields["evidence_classification"] in {None, "CONTROLLED_SAME_OPERATOR_VALIDATION"}
+        and (checks_pass or (not checks and verified_transport_shape))
     )
     controlled_evidence = positive and same_operator and not independent_reputation
     return {
-        "request_id": normalized.get("request_id"),
-        "authenticity": normalized.get("authenticity", "PROVENANCE_INCOMPLETE"),
-        "correctness": normalized.get("correctness", status or "UNKNOWN"),
-        "reproducibility": normalized.get("reproducibility", "UNKNOWN"),
+        "request_id": fields["request_id"],
+        "result_hash": fields["result_hash"],
+        "bench_did": fields["bench_did"],
+        "authenticity": fields["authenticity"] or "PROVENANCE_INCOMPLETE",
+        "correctness": fields["correctness"] or "UNKNOWN",
+        "reproducibility": fields["reproducibility"] or "UNKNOWN",
         "same_operator": same_operator,
         "independent_reputation": independent_reputation,
         "evidence_class": "CONTROLLED_SAME_OPERATOR_VALIDATION" if controlled_evidence else "NOT_POSITIVE_CAPABILITY_EVIDENCE",
         "capability_support": ["software.testing", "verification"] if controlled_evidence else [],
         "independent_peer_reputation": False,
-        "artifact_hashes_valid": bool(normalized.get("artifact_hashes_valid")),
+        "artifact_hashes_valid": bool(normalized.get("artifact_hashes_valid", True)),
+        "validation_errors": errors,
+        "routing_decision_id": fields["routing_decision_id"],
+        "routing_decision_hash": fields["routing_decision_hash"],
+        "task_hash": fields["task_hash"],
+        "verification_mode": fields["verification_mode"],
+        "transport_provenance": fields["transport_provenance"],
         "network_writes": 0,
         "private_key_accesses": 0,
         "tclk_settlement_actions": 0,
@@ -2192,21 +2271,52 @@ def classify_normalized_bench_result(normalized: dict) -> dict:
 def ingest_normalized_bench_result(path: Path, store_path: Path = DEFAULT_VERIFICATION_EVIDENCE_STORE) -> dict:
     normalized = json.loads(path.read_text(encoding="utf-8"))
     classification = classify_normalized_bench_result(normalized)
+    logical_evidence_id = f"validation:{classification['request_id']}:{classification['result_hash']}:{classification['bench_did']}"
     record = {
         "schema_version": "router.controlled-verification-evidence/v1",
         "source_path": str(path),
         "source_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "logical_evidence_id": logical_evidence_id,
         "classification": classification,
         "normalized_result": normalized,
     }
     existing = []
     if store_path.exists():
         existing = [json.loads(line) for line in store_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    by_request = {item["classification"]["request_id"]: item for item in existing}
-    by_request[str(classification["request_id"])] = record
+    def stored_logical_id(item: dict) -> str | None:
+        if item.get("logical_evidence_id"):
+            return str(item["logical_evidence_id"])
+        prior = item.get("normalized_result")
+        if isinstance(prior, dict):
+            prior_classification = classify_normalized_bench_result(prior)
+            if prior_classification.get("request_id") and prior_classification.get("result_hash") and prior_classification.get("bench_did"):
+                return f"validation:{prior_classification['request_id']}:{prior_classification['result_hash']}:{prior_classification['bench_did']}"
+        return None
+
+    existing_ids = {stored_logical_id(item): item for item in existing}
+    same_request = [item for item in existing if item.get("classification", {}).get("request_id") == classification["request_id"]]
+    conflicting = [item for item in same_request if stored_logical_id(item) not in {None, logical_evidence_id}]
+    if conflicting:
+        record["ingest_status"] = "REJECTED_CONTRADICTION"
+        record["classification"]["evidence_class"] = "NOT_POSITIVE_CAPABILITY_EVIDENCE"
+        record["classification"]["capability_support"] = []
+        record["classification"]["validation_errors"] = ["result_hash mismatch for existing request_id"]
+        return record
+    by_identity = {
+        stored_logical_id(item) or item.get("classification", {}).get("request_id"): item
+        for item in existing
+    }
+    previous = by_identity.get(logical_evidence_id)
+    if previous and previous.get("classification", {}).get("authenticity") == "UNSIGNED_LOCAL" and classification.get("authenticity") == "VERIFIED_OFFLINE":
+        record["provenance_update"] = "UPGRADED_EXISTING_EVIDENCE"
+    elif previous:
+        record["provenance_update"] = "IDEMPOTENT_EXISTING_EVIDENCE"
+    else:
+        record["provenance_update"] = "NEW_EVIDENCE"
+    by_identity[logical_evidence_id] = record
     store_path.parent.mkdir(parents=True, exist_ok=True)
     store_path.write_text(
-        "\n".join(json.dumps(item, sort_keys=True) for item in by_request.values()) + "\n",
+        "\n".join(json.dumps(item, sort_keys=True) for item in by_identity.values()) + "\n",
         encoding="utf-8",
     )
     return record
@@ -2226,15 +2336,17 @@ def verification_lifecycle_report(request_path: Path, scout_preview_path: Path, 
         (item for item in router_records if item.get("classification", {}).get("request_id") == request["request_id"]),
         None,
     )
+    scout_classification = classify_normalized_bench_result(scout_normalized)
     return {
         "request_id": request["request_id"],
         "REQUEST_CREATED": request.get("artifact_hash"),
         "SCOUT_PREVIEWED": preview.get("message_hash"),
         "BENCH_VERIFIED": bench_result.get("status"),
-        "SCOUT_INGESTED_RESULT": scout_normalized.get("correctness"),
-        "ROUTER_INGESTED_EVIDENCE": router_record.get("classification", {}).get("evidence_class") if router_record else "MISSING",
-        "same_operator": scout_normalized.get("same_operator"),
-        "independent_reputation": scout_normalized.get("independent_reputation"),
+        "SCOUT_INGESTED_RESULT": scout_classification.get("correctness"),
+        "ROUTER_INGESTED_EVIDENCE": router_record.get("classification", {}).get("evidence_class") if router_record else scout_classification.get("evidence_class", "MISSING"),
+        "AUTHENTICITY": scout_classification.get("authenticity"),
+        "same_operator": scout_classification.get("same_operator"),
+        "independent_reputation": scout_classification.get("independent_reputation"),
         "network_writes": 0,
         "private_key_accesses": 0,
     }
@@ -5066,6 +5178,8 @@ def main() -> None:
                 "same_operator": record["classification"]["same_operator"],
                 "independent_reputation": record["classification"]["independent_reputation"],
                 "capability_support": record["classification"]["capability_support"],
+                "authenticity": record["classification"]["authenticity"],
+                "provenance_update": record.get("provenance_update"),
                 "network_writes": 0,
                 "private_key_accesses": 0,
                 "tclk_settlement_actions": 0,
