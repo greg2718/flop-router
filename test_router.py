@@ -366,8 +366,8 @@ class RouterTests(unittest.TestCase):
             profiles[did],
         )
         self.assertEqual(candidate.task_relevant_evidence_counts["blockchain.solidity"], 0)
-        self.assertEqual(candidate.score_components["capability_evidence_strength"], 0)
-        self.assertEqual(candidate.qualification, "NO_MATCH")
+        self.assertEqual(candidate.score, 0.0)
+        self.assertEqual(candidate.qualification, "DISQUALIFIED")
 
     def test_repeated_self_assertion_cannot_create_strong_demonstrated_capability(self):
         did = "did:key:z6MkClaims"
@@ -2703,7 +2703,8 @@ class RouterTests(unittest.TestCase):
             router.ExecutionConstraints(asset="USDC", allowed_rails=["unsupported-rail"]),
         )
         self.assertEqual(plan.qualification, "DISQUALIFIED")
-        self.assertEqual(plan.worker["did"], "none")
+        self.assertEqual(plan.worker["did"], "did:key:z6MkSyntheticDebugAgent111111111111111111111111111111")
+        self.assertEqual(plan.settlement_plan["status"], "NO_COMPATIBLE_SETTLEMENT_ROUTE")
 
     def test_fixture_decision_contains_selected_worker_and_supporting_evidence(self):
         observations = router.load_fixture_observations(router.DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE)
@@ -2957,7 +2958,7 @@ class RouterTests(unittest.TestCase):
             router.analyze_task("Reproduce an Ed25519 signed POST failure against Technocore"),
             profile,
         )
-        self.assertEqual(candidate.qualification, "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(candidate.qualification, "DISQUALIFIED")
         self.assertIn("technocore.signed_post", profile.low_quality_capability_signals)
         self.assertEqual(candidate.supported_required, [])
 
@@ -3255,6 +3256,167 @@ class RouterTests(unittest.TestCase):
         selected = {member.candidate.profile.identity.did for member in result.members}
         rejected = {did for did, _reason in result.rejected_candidates}
         self.assertTrue(selected.isdisjoint(rejected))
+
+    def test_counterparty_score_weights_are_exact_and_bounded(self):
+        self.assertEqual(router.WORK_SCORE_WEIGHTS, {
+            "claimed_capability": 5,
+            "observed_behavior": 25,
+            "bench_evidence": 25,
+            "completion_history": 15,
+            "independent_counterparties": 10,
+            "trust_risk": 20,
+        })
+        self.assertEqual(router.SETTLEMENT_SCORE_WEIGHTS, {
+            "tclk_history": 30,
+            "supported_rails": 25,
+            "price_cost": 25,
+            "settlement_reliability": 15,
+            "settlement_trust_risk": 5,
+        })
+        self.assertEqual(sum(router.WORK_SCORE_WEIGHTS.values()), 100)
+        self.assertEqual(sum(router.SETTLEMENT_SCORE_WEIGHTS.values()), 100)
+
+    def test_claimed_capability_is_discovery_only(self):
+        did = "did:key:z6MkClaimOnly"
+        profile = router.ProfileBuilder([obs(did, 1, "hello")]).build_all()
+        profile[did].claimed_capabilities.add("software.debugging")
+        candidate = router.Router(profile).score_candidate(router.analyze_task("Debug an HTTP 400 response"), profile[did])
+        self.assertNotEqual(candidate.qualification, "CREDIBLE")
+        self.assertLess(candidate.work_score, 100.0)
+
+    def test_settlement_blend_only_applies_after_qualification(self):
+        observations = router.load_fixture_observations(router.DEFAULT_EVIDENCE_CONSISTENCY_FIXTURE)
+        profiles = router.ProfileBuilder(observations).build_all()
+        plan = router.create_execution_plan(
+            "Diagnose a signed HTTP 400 caused by incorrect nonce ordering.", profiles,
+            router.ExecutionConstraints(asset="FLOP", allowed_rails=["flop-htlc"], allowed_lock_types=["hash"]),
+        )
+        self.assertEqual(plan.qualification, "DISQUALIFIED")
+        self.assertEqual(plan.worker["did"], "did:key:z6MkSyntheticDebugAgent111111111111111111111111111111")
+        self.assertEqual(plan.settlement_plan["settlement_execution"], "DISABLED")
+
+    def test_invalid_settlement_inputs_fail_closed(self):
+        evidence = router.SettlementEvidence(
+            did="did:key:z6MkSettlement", level="OBSERVED_SIGNED_SUPPORT", protocol="tclk/1",
+            rail="flop-htlc", lock_kind="hash", asset="FLOP", amount_text="1.5",
+            amount_units=None, offer_id="offer", contract_id="contract", provenance="synthetic",
+            amount_valid=False,
+        )
+        ok, reason = router.settlement_evidence_compatible(
+            evidence, router.ExecutionConstraints(asset="FLOP", allowed_rails=["flop-htlc"]),
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "invalid amount")
+
+    def test_unknown_operator_groups_are_not_independent(self):
+        items = [router.SettlementEvidence(
+            did=f"did:key:z6Mk{i}", level="OBSERVED_SIGNED_SUPPORT", protocol="tclk/1",
+            rail="flop-htlc", lock_kind="hash", asset="FLOP", amount_text="1", amount_units=1,
+            offer_id=str(i), contract_id=str(i), provenance="synthetic", operator_group=group,
+        ) for i, group in enumerate((None, "UNKNOWN", router.UNKNOWN_GENERATION, router.LOCAL_OPERATOR_GROUP))]
+        self.assertEqual(router.independent_operator_group_count(items), 0)
+
+    def test_empty_work_and_settlement_scores_are_zero(self):
+        profile = router.ProfileBuilder([obs("did:key:z6MkEmptyScores", 1, "hello")]).build_all()["did:key:z6MkEmptyScores"]
+        task = router.Task("empty", [router.RequiredCapability("software.debugging", "REQUIRED", 1.0)])
+        work, work_components = router.work_score_for(profile, task)
+        settlement, settlement_components = router.settlement_score_for(profile)
+        self.assertEqual(work, 0.0)
+        self.assertEqual(settlement, 0.0)
+        self.assertTrue(all(value == 0.0 for value in work_components.values()))
+        self.assertTrue(all(value == 0.0 for value in settlement_components.values()))
+
+    def test_scores_clamp_to_zero_and_one_hundred(self):
+        did = "did:key:z6MkClamped"
+        profile = router.ProfileBuilder([obs(did, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it.")]).build_all()[did]
+        profile.positive_trust_evidence = 99.0
+        profile.settlement_reliability = 99.0
+        score, _ = router.work_score_for(profile, router.analyze_task("Debug an HTTP 400 response"))
+        settlement, _ = router.settlement_score_for(profile)
+        self.assertGreaterEqual(score, 0.0)
+        self.assertLessEqual(score, 100.0)
+        self.assertGreaterEqual(settlement, 0.0)
+        self.assertLessEqual(settlement, 100.0)
+
+    def test_active_profile_without_explicit_trust_scores_zero_trust(self):
+        did = "did:key:z6MkNoTrust"
+        profile = router.ProfileBuilder([obs(did, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it.")]).build_all()[did]
+        candidate = router.Router({did: profile}).score_candidate(router.analyze_task("Debug an HTTP 400 response"), profile)
+        self.assertEqual(candidate.score_components["trust_risk"], 0.0)
+
+    def test_explicit_positive_trust_is_deterministic_and_bench_is_separate(self):
+        did = "did:key:z6MkPositiveTrust"
+        profile = router.ProfileBuilder([obs(did, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it.")]).build_all()[did]
+        profile.positive_trust_evidence = 0.75
+        candidate = router.Router({did: profile}).score_candidate(router.analyze_task("Debug an HTTP 400 response"), profile)
+        self.assertEqual(candidate.score_components["trust_risk"], 0.75)
+        self.assertEqual(candidate.score_components["bench_evidence"], 0.0)
+
+    def test_hard_risk_short_circuits_all_score_functions(self):
+        did = "did:key:z6MkHardRisk"
+        profile = router.ProfileBuilder([obs(did, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it.")]).build_all()[did]
+        profile.hard_trust_flags.add("SECURITY_REJECT")
+        with patch.object(router, "work_score_for", side_effect=AssertionError("work score invoked")), patch.object(router, "settlement_score_for", side_effect=AssertionError("settlement score invoked")):
+            candidate = router.Router({did: profile}).score_candidate(router.analyze_task("Debug an HTTP 400 response"), profile)
+        self.assertEqual(candidate.qualification, "DISQUALIFIED")
+        self.assertEqual(candidate.score, 0.0)
+        self.assertEqual(candidate.reason_codes, ["HARD_TRUST_FLAG"])
+
+    def test_soft_risk_warning_and_deduction_are_explicit_and_once(self):
+        did = "did:key:z6MkSoftRisk"
+        profile = router.ProfileBuilder([obs(did, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it.")]).build_all()[did]
+        profile.positive_trust_evidence = 1.0
+        profile.soft_risk_flags = {"PROMOTIONAL_ACTIVITY"}
+        candidate = router.Router({did: profile}).score_candidate(router.analyze_task("Debug an HTTP 400 response"), profile)
+        self.assertEqual(candidate.qualification, "CREDIBLE")
+        self.assertEqual(candidate.reason_codes, ["SOFT_RISK_PRESENT"])
+        self.assertEqual(candidate.score_components["trust_risk"], 0.8)
+        self.assertEqual(candidate.penalties["soft_risk"], 0.2)
+        self.assertIn("SOFT_RISK: PROMOTIONAL_ACTIVITY", candidate.evidence_quality_warning)
+
+    def test_malformed_deadline_fails_closed_and_future_deadline_is_valid(self):
+        base = router.SettlementEvidence(
+            did="did:key:z6MkDeadline", level="OBSERVED_SIGNED_SUPPORT", protocol="tclk/1",
+            rail="flop-htlc", lock_kind="hash", asset="FLOP", amount_text="1", amount_units=1,
+            offer_id="offer", contract_id="contract", provenance="synthetic",
+        )
+        constraints = router.ExecutionConstraints(asset="FLOP", allowed_rails=["flop-htlc"])
+        malformed, reason = router.settlement_evidence_compatible(replace(base, deadlines={"expires_at": "not-a-date"}), constraints)
+        future, _ = router.settlement_evidence_compatible(replace(base, deadlines={"expires_at": "2999-01-01T00:00:00Z"}), constraints)
+        expired, expired_reason = router.settlement_evidence_compatible(replace(base, deadlines={"expires_at": "2000-01-01T00:00:00Z"}), constraints)
+        missing, _ = router.settlement_evidence_compatible(base, constraints)
+        self.assertFalse(malformed)
+        self.assertEqual(reason, "invalid deadline")
+        self.assertTrue(future)
+        self.assertFalse(expired)
+        self.assertEqual(expired_reason, "expired offer")
+        self.assertTrue(missing)
+
+    def test_required_settlement_blend_is_exact(self):
+        self.assertEqual(router.selection_score_for(40.0, 80.0), 54.0)
+
+    def test_order_is_stable_when_profile_insertion_order_is_reversed(self):
+        first = "did:key:z6MkTieA"
+        second = "did:key:z6MkTieB"
+        records = [(first, obs(first, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it.")), (second, obs(second, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it."))]
+        forward = router.Router({did: router.ProfileBuilder([observation]).build_all()[did] for did, observation in records}).route("Debug an HTTP 400 response")
+        reverse = router.Router({did: router.ProfileBuilder([observation]).build_all()[did] for did, observation in reversed(records)}).route("Debug an HTTP 400 response")
+        self.assertEqual([item.profile.identity.did for item in forward.candidates], [item.profile.identity.did for item in reverse.candidates])
+
+    def test_no_qualified_route_status_is_explicit(self):
+        result = router.Router({}).route("Debug an HTTP 400 response")
+        self.assertEqual(result.status, "NO_QUALIFIED_ROUTE")
+
+    def test_printed_route_describes_authoritative_work_score(self):
+        did = "did:key:z6MkPrintedScore"
+        profiles = router.ProfileBuilder([obs(did, 1, "I traced the HTTP 400 failure to a payload ordering bug and fixed it.")]).build_all()
+        result = router.Router(profiles).route("Debug an HTTP 400 response")
+        self.assertEqual(result.weights, router.WORK_SCORE_WEIGHTS)
+        output = StringIO()
+        with redirect_stdout(output):
+            router.print_route(result)
+        self.assertIn("Work score (authoritative)", output.getvalue())
+        self.assertIn("qualification precedes scoring", output.getvalue())
 
 
 if __name__ == "__main__":

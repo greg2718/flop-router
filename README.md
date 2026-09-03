@@ -73,6 +73,10 @@ settlement_execution: DISABLED
 
 Router consumes normalized TCLK observations as evidence for settlement compatibility. It does not implement the normative TCLK state machine, sign TCLK frames, accept offers, lock funds, reveal/refund/cancel, generate settlement secrets, or write to Technocore.
 
+### Selection scoring
+
+Qualification precedes scoring. `work_score` is the authoritative routing score, using bounded weights `5/25/25/15/10/20` for claimed capability, observed behavior, Bench evidence, completion history, independent counterparties, and trust/risk. Claims are discovery signals only and cannot satisfy a required capability. Trust requires affirmative profile evidence; ordinary activity and absence of risk are not trust evidence. Soft risks produce explicit warnings and deterministic deductions. When settlement is explicitly required, compatibility and hard safety gates run first, then selection uses exactly `0.65 * work_score + 0.35 * settlement_score`; otherwise settlement inputs do not affect worker selection. Malformed settlement deadlines are rejected. A qualified worker with no compatible settlement retains its work route and receives `NO_COMPATIBLE_SETTLEMENT_ROUTE`. Settlement remains `SIMULATION_ONLY` with execution `DISABLED`.
+
 ## Related Agents
 
 Operator group:

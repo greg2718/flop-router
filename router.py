@@ -323,6 +323,7 @@ class ExecutionConstraints:
     job_proto: str | None = None
     job_id: str | None = None
     min_independent_operator_groups: int = 1
+    settlement_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -333,6 +334,7 @@ class ExecutionPlan:
     security_policy: dict[str, str]
     qualification: str
     reasons: list[str]
+    reason_codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -371,6 +373,14 @@ class AgentProfile:
     direct_interaction_evidence: list[str] = field(default_factory=list)
     validated_capability_evidence: dict[str, list[ValidatedCapabilityEvidence]] = field(default_factory=dict)
     settlement_evidence: list[SettlementEvidence] = field(default_factory=list)
+    claimed_capabilities: set[str] = field(default_factory=set)
+    completion_successes: int = 0
+    completion_failures: int = 0
+    independent_counterparty_groups: set[str] = field(default_factory=set)
+    hard_trust_flags: set[str] = field(default_factory=set)
+    soft_risk_flags: set[str] = field(default_factory=set)
+    settlement_reliability: float = 0.0
+    positive_trust_evidence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -408,6 +418,10 @@ class RoutingCandidate:
     task_relevant_support_levels: dict[str, str] = field(default_factory=dict)
     task_relevant_validation_outcomes: dict[str, list[str]] = field(default_factory=dict)
     evidence_quality_warning: str | None = None
+    work_score: float = 0.0
+    settlement_score: float = 0.0
+    selection_score: float = 0.0
+    reason_codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -416,6 +430,7 @@ class RoutingResult:
     candidates: list[RoutingCandidate]
     weights: dict[str, float]
     partial_candidates: list[RoutingCandidate] = field(default_factory=list)
+    status: str = "OK"
 
 
 @dataclass
@@ -505,13 +520,22 @@ REQUIRED_EVIDENCE_THRESHOLDS = {
     "strong_reproducible_observations": 1,
 }
 
-ROUTING_WEIGHTS = {
-    "capability_match": 0.48,
-    "capability_evidence_strength": 0.20,
-    "originality": 0.13,
-    "substantive_activity": 0.09,
-    "peer_breadth": 0.03,
-    "recency": 0.07,
+# These are the only weights used for counterparty selection.  Component
+# values are normalized to 0..100 before applying the integer weights.
+WORK_SCORE_WEIGHTS = {
+    "claimed_capability": 5,
+    "observed_behavior": 25,
+    "bench_evidence": 25,
+    "completion_history": 15,
+    "independent_counterparties": 10,
+    "trust_risk": 20,
+}
+SETTLEMENT_SCORE_WEIGHTS = {
+    "tclk_history": 30,
+    "supported_rails": 25,
+    "price_cost": 25,
+    "settlement_reliability": 15,
+    "settlement_trust_risk": 5,
 }
 
 PENALTY_WEIGHTS = {
@@ -1968,7 +1992,7 @@ def role_label(capabilities: list[str]) -> str:
 
 
 def team_member_quality(candidate: RoutingCandidate) -> str:
-    score = candidate.score_components.get("capability_evidence_strength", 0.0)
+    score = candidate.score_components.get("bench_evidence", 0.0)
     originality = candidate.profile.trust_evidence.components["originality"]
     template_risk = candidate.profile.trust_evidence.components["template_risk"]
     if score >= 0.7 and originality >= 0.6 and template_risk < 0.25:
@@ -3339,16 +3363,95 @@ def analyze_task(task_text: str) -> Task:
     return Task(text=task_text, required_capabilities=required[:8])
 
 
+def _bounded_score(value: float) -> float:
+    return round(max(0.0, min(100.0, float(value))), 6)
+
+
+def valid_rail(rail: str | None) -> bool:
+    return isinstance(rail, str) and bool(re.fullmatch(r"[a-z0-9][a-z0-9._:-]*", rail))
+
+
+def independent_operator_group(group: str | None) -> str | None:
+    if not isinstance(group, str) or group in {"", "UNKNOWN", UNKNOWN_GENERATION, ROUTER_OPERATOR_GROUP, LOCAL_OPERATOR_GROUP}:
+        return None
+    return group
+
+
+def _work_score_components(profile: AgentProfile, task: Task) -> dict[str, float]:
+    relevant = [req.capability_id for req in task.required_capabilities]
+    cap_index = {cap.capability_id: cap for cap in profile.capabilities}
+    claims = set(profile.claimed_capabilities)
+    claims.update(cap for cap, count in profile.low_quality_capability_signals.items() if count)
+    claimed = sum(1 for cap in relevant if cap in claims) / max(1, len(relevant))
+    observed = sum(cap_index[cap].confidence for cap in relevant if cap in cap_index) / max(1, len(relevant))
+    passes = [item.score for items in profile.validated_capability_evidence.values() for item in items if item.result == "PASS"]
+    bench = (sum(passes) / len(passes) / 100.0) if passes else 0.0
+    total = profile.completion_successes + profile.completion_failures
+    completion = profile.completion_successes / total if total else 0.0
+    groups = {group for group in profile.independent_counterparty_groups if independent_operator_group(group)}
+    independent = min(1.0, len(groups) / 3.0)
+    positive_trust = profile.positive_trust_evidence if isinstance(profile.positive_trust_evidence, (int, float)) and not isinstance(profile.positive_trust_evidence, bool) else 0.0
+    trust = 0.0 if profile.hard_trust_flags else max(0.0, min(1.0, positive_trust))
+    trust = max(0.0, trust - 0.2 * len(profile.soft_risk_flags))
+    return {key: round(max(0.0, min(1.0, value)), 3) for key, value in {
+        "claimed_capability": claimed,
+        "observed_behavior": observed,
+        "bench_evidence": bench,
+        "completion_history": completion,
+        "independent_counterparties": independent,
+        "trust_risk": trust,
+    }.items()}
+
+
+def work_score_for(profile: AgentProfile, task: Task, capability_matches: dict[str, str] | None = None, evidence_count: int = 0, validation_count: int = 0) -> tuple[float, dict[str, float]]:
+    """Calculate work score; claims are deliberately a small discovery signal."""
+    components = _work_score_components(profile, task)
+    return _bounded_score(sum(components[key] * weight for key, weight in WORK_SCORE_WEIGHTS.items())), components
+
+
+def settlement_score_for(profile: AgentProfile, constraints: ExecutionConstraints | None = None) -> tuple[float, dict[str, float]]:
+    constraints = constraints or ExecutionConstraints()
+    valid = [item for item in profile.settlement_evidence if settlement_evidence_compatible(item, constraints)[0]]
+    if not valid:
+        return 0.0, {key: 0.0 for key in SETTLEMENT_SCORE_WEIGHTS}
+    level_score = {"VERIFIED_USAGE": 1.0, "OBSERVED_SIGNED_SUPPORT": 0.8, "ADVERTISED_HINT": 0.25}
+    evidence = max(level_score.get(item.level, 0.0) for item in valid)
+    rail = 1.0 if not constraints.allowed_rails or any(item.rail in constraints.allowed_rails for item in valid) else 0.0
+    price = 0.5 if any(item.amount_units is not None for item in valid) else 0.0
+    if constraints.max_amount is not None:
+        amounts = [item.amount_units for item in valid if item.amount_units is not None]
+        price = 1.0 if amounts and constraints.max_amount > 0 and min(amounts) <= constraints.max_amount else 0.0
+    reliability = max(0.0, min(1.0, profile.settlement_reliability))
+    trust = 1.0 if valid and not profile.hard_trust_flags else 0.0
+    trust = max(0.0, trust - 0.25 * len(profile.soft_risk_flags))
+    components = {"tclk_history": round(evidence, 3), "supported_rails": round(rail, 3), "price_cost": round(price, 3), "settlement_reliability": round(reliability, 3), "settlement_trust_risk": round(trust, 3)}
+    return _bounded_score(sum(components[key] * weight for key, weight in SETTLEMENT_SCORE_WEIGHTS.items())), components
+
+
+def selection_score_for(work_score: float, settlement_score: float) -> float:
+    return round(max(0.0, min(100.0, 0.65 * work_score + 0.35 * settlement_score)), 6)
+
+
+def _zero_score_components() -> dict[str, float]:
+    return {key: 0.0 for key in WORK_SCORE_WEIGHTS}
+
+
 class Router:
     def __init__(self, profiles: dict[str, AgentProfile], weights: dict[str, float] | None = None):
         self.profiles = profiles
-        self.weights = weights or ROUTING_WEIGHTS
+        # `weights` remains accepted for API compatibility, but work scoring is
+        # intentionally the single authoritative selection model.
+        self.weights = dict(WORK_SCORE_WEIGHTS)
 
     def route(self, task_text: str, top: int = 5) -> RoutingResult:
         task = analyze_task(task_text)
         candidates = [self.score_candidate(task, profile) for profile in self.profiles.values()]
         credible = [c for c in candidates if c.qualification == "CREDIBLE"]
-        partial = [c for c in candidates if c.qualification == "PARTIAL"]
+        partial = [
+            replace(c, qualification="PARTIAL")
+            for c in candidates
+            if c.qualification == "PARTIAL" or "REQUIRED_CAPABILITY_MISSING" in c.reason_codes
+        ]
         credible.sort(key=lambda c: (-c.score, -len(c.supported_required), c.profile.identity.did))
         partial.sort(key=lambda c: (-len(c.supported_required), -c.score, c.profile.identity.did))
         return RoutingResult(
@@ -3356,6 +3459,7 @@ class Router:
             candidates=credible[:top],
             weights=self.weights,
             partial_candidates=partial[:top],
+            status="OK" if credible else "NO_QUALIFIED_ROUTE",
         )
 
     def score_candidate(self, task: Task, profile: AgentProfile) -> RoutingCandidate:
@@ -3455,36 +3559,74 @@ class Router:
         else:
             qualification = "CREDIBLE"
 
+        hard_reasons = []
+        if profile.hard_trust_flags:
+            hard_reasons.append("HARD_TRUST_FLAG")
+        if missing_required:
+            hard_reasons.append("REQUIRED_CAPABILITY_MISSING")
+        if qualification in {"INSUFFICIENT_EVIDENCE", "NO_MATCH"}:
+            hard_reasons.append("INSUFFICIENT_REQUIRED_EVIDENCE")
+        if hard_reasons:
+            return RoutingCandidate(
+                profile=profile,
+                score=0.0,
+                match_confidence=band(0.0),
+                qualification="DISQUALIFIED",
+                capability_matches=capability_matches,
+                trust_components={
+                    "originality": profile.trust_evidence.originality.lower(),
+                    "template risk": profile.trust_evidence.template_risk.lower(),
+                    "activity recency": profile.trust_evidence.activity_recency.lower(),
+                    "capability evidence": f"{evidence_count} task-relevant usable observations; {validation_count} validated passes",
+                    "direct interaction edges": profile.trust_evidence.independent_peer_breadth.lower(),
+                },
+                why_ranked=self._why_ranked(profile, capability_matches, evidence_count),
+                evidence_sequences=list(dict.fromkeys(evidence_sequences or profile.evidence_sequences[:5]))[:8],
+                score_components=_zero_score_components(),
+                penalties={},
+                supported_required=supported_required,
+                limited_required=limited_required,
+                missing_required=missing_required,
+                supported_important=supported_important,
+                missing_important=missing_important,
+                task_relevant_evidence_counts=task_relevant_counts,
+                task_relevant_strong_counts=task_relevant_strong_counts,
+                task_relevant_support_levels=task_relevant_support_levels,
+                task_relevant_validation_outcomes=task_relevant_validation_outcomes,
+                evidence_quality_warning=None,
+                reason_codes=hard_reasons,
+            )
+        qualification = "CREDIBLE"
+
         trust = profile.trust_evidence.components
         task_evidence_strength = min(1.0, (evidence_count + strong_count + 3 * validation_count) / max(1, 2 * max(1, len(task.required_capabilities))))
-        component_scores = {
-            "capability_match": capability_match,
-            "capability_evidence_strength": task_evidence_strength,
-            "originality": trust["originality"],
-            "substantive_activity": trust["substantive_activity"],
-            "peer_breadth": trust["independent_peer_breadth"],
-            "recency": trust["activity_recency"],
+        diagnostic_components = {
+            "diagnostic_legacy_capability_match": capability_match,
+            "diagnostic_legacy_capability_evidence_strength": task_evidence_strength,
+            "diagnostic_legacy_originality": trust["originality"],
+            "diagnostic_legacy_substantive_activity": trust["substantive_activity"],
+            "diagnostic_legacy_peer_breadth": trust["independent_peer_breadth"],
+            "diagnostic_legacy_recency": trust["activity_recency"],
         }
-        penalties = {
+        diagnostic_penalties = {
             "template_ratio": trust["template_risk"] * PENALTY_WEIGHTS["template_ratio"],
             "promotional_ratio": trust["promotion_risk"] * PENALTY_WEIGHTS["promotional_ratio"],
             "weak_evidence": (1.0 if capability_match < 0.25 else 0.0) * PENALTY_WEIGHTS["weak_evidence"],
             "closed_interaction_cluster": trust["sybil_cluster_risk"] * PENALTY_WEIGHTS["closed_interaction_cluster"],
         }
-        raw = sum(component_scores[k] * self.weights[k] for k in self.weights)
-        score = max(0.0, min(1.0, raw - sum(penalties.values())))
         evidence_quality_warning = None
         if task_evidence_strength >= 0.75 and trust["originality"] <= 0.1:
             evidence_quality_warning = "EVIDENCE QUALITY WARNING: Most apparent capability evidence comes from repeated/template activity."
         elif any(cap.quality_warning for cap in cap_index.values() if cap.capability_id in task_relevant_counts):
             evidence_quality_warning = "EVIDENCE QUALITY WARNING: Some apparent capability evidence lacks concrete/reproducible detail."
-        if evidence_quality_warning and qualification == "CREDIBLE" and missing_required:
-            qualification = "PARTIAL"
+        soft_reason_codes = ["SOFT_RISK_PRESENT"] if profile.soft_risk_flags else []
+        if profile.soft_risk_flags:
+            evidence_quality_warning = "; ".join(filter(None, [evidence_quality_warning, "SOFT_RISK: " + ", ".join(sorted(profile.soft_risk_flags))]))
         why = self._why_ranked(profile, capability_matches, evidence_count)
-        return RoutingCandidate(
+        candidate = RoutingCandidate(
             profile=profile,
-            score=round(score, 3),
-            match_confidence=band(score),
+            score=0.0,
+            match_confidence=band(0.0),
             qualification=qualification,
             capability_matches=capability_matches,
             trust_components={
@@ -3496,8 +3638,8 @@ class Router:
             },
             why_ranked=why,
             evidence_sequences=list(dict.fromkeys(evidence_sequences or profile.evidence_sequences[:5]))[:8],
-            score_components={k: round(v, 3) for k, v in component_scores.items()},
-            penalties={k: round(v, 3) for k, v in penalties.items()},
+            score_components=diagnostic_components,
+            penalties={**diagnostic_penalties, "soft_risk": round(0.2 * len(profile.soft_risk_flags), 3)},
             supported_required=supported_required,
             limited_required=limited_required,
             missing_required=missing_required,
@@ -3509,6 +3651,14 @@ class Router:
             task_relevant_validation_outcomes=task_relevant_validation_outcomes,
             evidence_quality_warning=evidence_quality_warning,
         )
+        work_score, work_components = work_score_for(profile, task, capability_matches, evidence_count, validation_count)
+        candidate.work_score = work_score
+        candidate.score = round(work_score / 100.0, 6)
+        candidate.match_confidence = band(candidate.score)
+        candidate.selection_score = candidate.score
+        candidate.score_components.update(work_components)
+        candidate.reason_codes = soft_reason_codes
+        return candidate
 
     def _why_ranked(self, profile: AgentProfile, capability_matches: dict[str, str], evidence_count: int) -> str:
         validated = [cap for cap, strength in capability_matches.items() if "VALIDATED_PASS" in strength]
@@ -3552,9 +3702,17 @@ class Router:
 
         scored = [self.score_candidate(task, profile) for profile in self.profiles.values()]
         relevant = [
-            candidate for candidate in scored
+            replace(candidate, qualification="PARTIAL") if "REQUIRED_CAPABILITY_MISSING" in candidate.reason_codes else candidate
+            for candidate in scored
             if (candidate.supported_required or candidate.limited_required) and candidate.qualification in {"PARTIAL", "CREDIBLE", "INSUFFICIENT_EVIDENCE"}
         ]
+        relevant.extend(
+            replace(candidate, qualification="PARTIAL")
+            for candidate in scored
+            if (candidate.supported_required or candidate.limited_required)
+            and "REQUIRED_CAPABILITY_MISSING" in candidate.reason_codes
+            and candidate not in relevant
+        )
         pool = self._composition_pool(relevant, required_ids)
         best_combo = self._select_team(pool, required_ids, max_agents, require_full=True)
         qualification = "CREDIBLE_TEAM"
@@ -3742,7 +3900,7 @@ class Router:
                     best_member = member
                     best_count = member.candidate.task_relevant_evidence_counts.get(capability_id, 0)
                     best_strong = member.candidate.task_relevant_strong_counts.get(capability_id, 0)
-                    best_confidence = member.candidate.score_components.get("capability_evidence_strength", 0.0)
+                    best_confidence = member.candidate.score_components.get("observed_behavior", 0.0)
             record = {
                 "capability": capability_id,
                 "agent": best_member.candidate.profile.identity.did if best_member else "none",
@@ -3941,6 +4099,7 @@ def print_profile(profile: AgentProfile) -> None:
 
 def print_route(result: RoutingResult) -> None:
     print_task(result.task)
+    print("Authoritative score: work_score; qualification precedes scoring.")
     print("Best candidate agents")
     print("---------------------\n")
     if not result.candidates:
@@ -3960,6 +4119,9 @@ def print_candidate(candidate: RoutingCandidate, *, index: int, partial: bool = 
     print(f"   Qualification: {candidate.qualification}")
     if not partial:
         print(f"   Match confidence: {candidate.match_confidence}")
+        print(f"   Work score (authoritative): {candidate.work_score:.3f}/100")
+    if candidate.reason_codes:
+        print(f"   Reason codes: {', '.join(candidate.reason_codes)}")
     print("\n   Supported required capabilities:")
     if candidate.supported_required:
         for cap in candidate.supported_required:
@@ -4037,15 +4199,15 @@ def print_explain(task: Task, candidate: RoutingCandidate) -> None:
             print(f"    {cap}: {count}")
     if candidate.evidence_quality_warning:
         print(f"  {candidate.evidence_quality_warning}")
-    print("\nWeighted score is used to rank candidates within qualification groups and cannot override missing required capabilities.\n")
-    print("Score components:")
+    print("\nAuthoritative score: work_score; qualification precedes scoring.\n")
+    print("Work score components:")
     for key, value in candidate.score_components.items():
         print(f"  {key:<30} {value}")
-    print("Penalties:")
+    print("Diagnostic penalties:")
     for key, value in candidate.penalties.items():
         print(f"  {key:<30} {value}")
     print("Weights:")
-    for key, value in ROUTING_WEIGHTS.items():
+    for key, value in WORK_SCORE_WEIGHTS.items():
         print(f"  {key:<30} {value}")
     print("\nEvidence:")
     for seq in candidate.evidence_sequences[:8]:
@@ -4570,9 +4732,17 @@ def search_agents(query: str, profiles: dict[str, AgentProfile], top: int = 10) 
 def settlement_evidence_compatible(evidence: SettlementEvidence, constraints: ExecutionConstraints) -> tuple[bool, str]:
     if evidence.level == "CONTRADICTED":
         return False, "settlement evidence contradicted"
+    if evidence.level not in SETTLEMENT_EVIDENCE_LEVELS or evidence.level == "NO_EVIDENCE":
+        return False, "settlement evidence unavailable"
     if not evidence.amount_valid:
         return False, "invalid amount"
-    if constraints.asset and evidence.asset and evidence.asset != constraints.asset:
+    if evidence.rail is None or not re.fullmatch(r"[a-z0-9][a-z0-9._:-]*", evidence.rail):
+        return False, "invalid rail"
+    if evidence.amount_units is None or isinstance(evidence.amount_units, bool) or not isinstance(evidence.amount_units, int) or evidence.amount_units <= 0:
+        return False, "invalid amount"
+    if constraints.max_amount is not None and (isinstance(constraints.max_amount, bool) or not isinstance(constraints.max_amount, int) or constraints.max_amount <= 0):
+        return False, "invalid maximum amount"
+    if constraints.asset and evidence.asset != constraints.asset:
         return False, "asset incompatible"
     if constraints.max_amount is not None and evidence.amount_units is not None and evidence.amount_units > constraints.max_amount:
         return False, "amount exceeds maximum"
@@ -4580,9 +4750,13 @@ def settlement_evidence_compatible(evidence: SettlementEvidence, constraints: Ex
         return False, "unsupported rail"
     if constraints.allowed_lock_types and evidence.lock_kind not in constraints.allowed_lock_types:
         return False, "unsupported lock type"
-    expires_at = evidence.deadlines.get("expires_at") or evidence.deadlines.get("deadline")
-    if expires_at and parse_timestamp(expires_at) and parse_timestamp(expires_at) < datetime.now(timezone.utc):
-        return False, "expired offer"
+    expires_at = evidence.deadlines.get("expires_at") if "expires_at" in evidence.deadlines else evidence.deadlines.get("deadline")
+    if expires_at is not None:
+        parsed_expiry = parse_timestamp(expires_at)
+        if parsed_expiry is None:
+            return False, "invalid deadline"
+        if parsed_expiry < datetime.now(timezone.utc):
+            return False, "expired offer"
     expires_ms = evidence.deadlines.get("expires_ms")
     if expires_ms is not None:
         try:
@@ -4611,6 +4785,8 @@ def best_settlement_evidence(profile: AgentProfile, constraints: ExecutionConstr
 
 def settlement_constraints_requested(constraints: ExecutionConstraints) -> bool:
     return bool(
+        constraints.settlement_required
+        or
         constraints.asset
         or constraints.max_amount is not None
         or constraints.allowed_rails
@@ -4621,7 +4797,13 @@ def settlement_constraints_requested(constraints: ExecutionConstraints) -> bool:
 
 
 def independent_operator_group_count(evidence_items: Iterable[SettlementEvidence]) -> int:
-    return len({item.operator_group or item.did for item in evidence_items})
+    groups = set()
+    for item in evidence_items:
+        group = item.operator_group
+        if not group or group in {"UNKNOWN", UNKNOWN_GENERATION, LOCAL_OPERATOR_GROUP, ROUTER_OPERATOR_GROUP}:
+            continue
+        groups.add(group)
+    return len(groups)
 
 
 def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], constraints: ExecutionConstraints) -> ExecutionPlan:
@@ -4671,6 +4853,7 @@ def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], con
             qualification="QUALIFIED_PLAN",
             reasons=["work route qualified; settlement was not requested"],
         )
+    eligible = []
     for candidate in routed.candidates:
         settlement, settlement_reasons = best_settlement_evidence(candidate.profile, constraints)
         if not settlement:
@@ -4687,6 +4870,14 @@ def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], con
         if settlement.sentinel_status == "REJECT":
             reasons.append("Sentinel REJECT")
             continue
+        candidate.settlement_score, _settlement_components = settlement_score_for(candidate.profile, constraints)
+        candidate.selection_score = selection_score_for(candidate.work_score, candidate.settlement_score)
+        eligible.append((candidate, settlement))
+    if eligible:
+        candidate, settlement = sorted(
+            eligible,
+            key=lambda item: (-item[0].selection_score, item[0].profile.identity.did),
+        )[0]
         worker = {
             "did": candidate.profile.identity.did,
             "capability_support": ", ".join(f"{cap}:{candidate.capability_matches[cap]}" for cap in candidate.supported_required),
@@ -4717,9 +4908,14 @@ def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], con
             qualification="QUALIFIED_PLAN",
             reasons=["required capability and settlement constraints satisfied"],
         )
+    candidate = routed.candidates[0]
+    worker = {
+        "did": candidate.profile.identity.did,
+        "capability_support": ", ".join(f"{cap}:{candidate.capability_matches[cap]}" for cap in candidate.supported_required),
+    }
     return ExecutionPlan(
-        worker={"did": "none", "capability_support": "required capability present but settlement route unavailable"},
-        settlement_plan={"protocol": "tclk/1", "status": "not planned", "mode": "SIMULATION_ONLY", "settlement_execution": "DISABLED"},
+        worker=worker,
+        settlement_plan={"protocol": "tclk/1", "status": "NO_COMPATIBLE_SETTLEMENT_ROUTE", "mode": "SIMULATION_ONLY", "settlement_execution": "DISABLED"},
         verification_plan={"mode": constraints.verification_mode, "required": constraints.verification_required},
         security_policy={"status": "NOT_EVALUATED"},
         qualification="DISQUALIFIED",
@@ -5333,7 +5529,7 @@ def main() -> None:
     elif args.command == "compose":
         print_team(Router(profiles).compose(args.task, max_agents=args.max_agents))
     elif args.command == "search-agents":
-        print_route(RoutingResult(task=analyze_task(args.query), candidates=search_agents(args.query, profiles, top=args.top), weights=ROUTING_WEIGHTS))
+        print_route(RoutingResult(task=analyze_task(args.query), candidates=search_agents(args.query, profiles, top=args.top), weights=WORK_SCORE_WEIGHTS))
     elif args.command == "explain":
         candidate = Router(profiles).explain(args.task, args.did)
         if not candidate:
