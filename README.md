@@ -73,6 +73,18 @@ settlement_execution: DISABLED
 
 Router consumes normalized TCLK observations as evidence for settlement compatibility. It does not implement the normative TCLK state machine, sign TCLK frames, accept offers, lock funds, reveal/refund/cancel, generate settlement secrets, or write to Technocore.
 
+## Shadow Worker
+
+The persistent worker is local-only and produces unsigned shadow recommendations. It never loads the Router private key during polling and performs no posting, claiming, signing, Bench invocation, Sentinel override, or settlement action:
+
+```text
+.venv/bin/python router.py worker once --state-dir ~/.flop_agents/router --shadow
+.venv/bin/python router.py worker run --state-dir ~/.flop_agents/router --poll-interval 60 --max-backoff 300 --shadow
+.venv/bin/python router.py worker status --state-dir ~/.flop_agents/router
+```
+
+Optional local tasks are read from `~/.flop_agents/router/worker/tasks.jsonl`. Worker state and shadow decisions are persisted under the same ignored worker directory. Unchanged task/evidence/policy inputs are suppressed by a stable shadow identity.
+
 ### Selection scoring
 
 Qualification precedes scoring. `work_score` is the authoritative routing score, using bounded weights `5/25/25/15/10/20` for claimed capability, observed behavior, Bench evidence, completion history, independent counterparties, and trust/risk. Claims are discovery signals only and cannot satisfy a required capability. Trust requires affirmative profile evidence; ordinary activity and absence of risk are not trust evidence. Soft risks produce explicit warnings and deterministic deductions. When settlement is explicitly required, compatibility and hard safety gates run first, then selection uses exactly `0.65 * work_score + 0.35 * settlement_score`; otherwise settlement inputs do not affect worker selection. Malformed settlement deadlines are rejected. A qualified worker with no compatible settlement retains its work route and receives `NO_COMPATIBLE_SETTLEMENT_ROUTE`. Settlement remains `SIMULATION_ONLY` with execution `DISABLED`.

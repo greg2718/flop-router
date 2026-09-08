@@ -3418,6 +3418,77 @@ class RouterTests(unittest.TestCase):
         self.assertIn("Work score (authoritative)", output.getvalue())
         self.assertIn("qualification precedes scoring", output.getvalue())
 
+    def test_worker_once_runs_one_shadow_cycle_without_identity_or_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            cycle = router.worker_once(state_dir)
+            self.assertEqual(cycle["mode"], "SHADOW")
+            self.assertEqual(cycle["status"], "HEALTHY")
+            self.assertEqual(cycle["network_writes"], 0)
+            self.assertEqual(cycle["private_key_accesses"], 0)
+            self.assertEqual(len((state_dir / "worker" / "worker_cycles.jsonl").read_text().splitlines()), 1)
+            self.assertFalse((state_dir / "identity.pem").exists())
+
+    def test_worker_shadow_decisions_are_idempotent_and_change_with_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            tasks = state_dir / "worker" / "tasks.jsonl"
+            tasks.parent.mkdir()
+            tasks.write_text(json.dumps({"job_id": "job-1", "task": "Debug an HTTP 400 response"}) + "\n")
+            first = router.worker_once(state_dir)
+            second = router.worker_once(state_dir)
+            self.assertEqual(first["shadow_decisions_produced"], 1)
+            self.assertEqual(second["shadow_decisions_produced"], 0)
+            self.assertEqual(second["duplicate_decisions_suppressed"], 1)
+            tasks.write_text(json.dumps({"job_id": "job-1", "task": "Debug an HTTP 500 response"}) + "\n")
+            changed = router.worker_once(state_dir)
+            self.assertEqual(changed["shadow_decisions_produced"], 1)
+            self.assertEqual(len((state_dir / "worker" / "shadow_decisions.jsonl").read_text().splitlines()), 2)
+
+    def test_worker_missing_and_malformed_optional_inputs_are_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            tasks = state_dir / "worker" / "tasks.jsonl"
+            tasks.parent.mkdir()
+            tasks.write_text("not-json\n" + json.dumps({"task": "Debug an HTTP 400 response"}) + "\n")
+            cycle = router.worker_once(state_dir)
+            self.assertEqual(cycle["tasks_observed"], 1)
+            self.assertEqual(cycle["shadow_decisions_produced"], 1)
+            self.assertTrue(cycle["errors"])
+
+    def test_worker_status_is_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            before = set(state_dir.iterdir())
+            status = router.worker_status(state_dir)
+            self.assertEqual(status["mode"], "SHADOW")
+            self.assertEqual(set(state_dir.iterdir()), before)
+            self.assertFalse((state_dir / "identity.pem").exists())
+
+    def test_worker_singleton_and_stale_lock_handling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            lock = router.acquire_worker_lock(state_dir)
+            with self.assertRaises(SystemExit):
+                router.acquire_worker_lock(state_dir)
+            router.release_worker_lock(lock)
+            lock = router.worker_paths(state_dir)["lock"]
+            lock.write_text("99999999")
+            recovered = router.acquire_worker_lock(state_dir)
+            self.assertTrue(recovered.exists())
+            router.release_worker_lock(recovered)
+
+    def test_worker_run_backoff_is_bounded_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            observed_delays = []
+            cycle = {"status": "DEGRADED"}
+            with patch.object(router, "run_worker_cycle", return_value=cycle), patch.object(router.time, "sleep", side_effect=lambda delay: (observed_delays.append(delay), (_ for _ in ()).throw(KeyboardInterrupt()))[1]):
+                with self.assertRaises(KeyboardInterrupt):
+                    router.run_worker_loop(state_dir, 2.0, 3.0)
+            self.assertEqual(observed_delays, [2.0])
+            self.assertFalse(router.worker_paths(state_dir)["lock"].exists())
+
 
 if __name__ == "__main__":
     unittest.main()

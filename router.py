@@ -7,7 +7,9 @@ import getpass
 import hashlib
 import json
 import math
+import os
 import re
+import signal
 import sqlite3
 import time
 import unicodedata
@@ -5120,6 +5122,314 @@ def verify_evidence_consistency(
     return verify_observations_consistency(observations, adapter.interactions(), "observer_db")
 
 
+WORKER_POLICY_VERSION = "flop-router-shadow/v1"
+
+
+def worker_paths(state_dir: Path) -> dict[str, Path]:
+    worker_dir = state_dir.expanduser() / "worker"
+    return {
+        "dir": worker_dir,
+        "state": worker_dir / "worker_state.json",
+        "cycles": worker_dir / "worker_cycles.jsonl",
+        "decisions": worker_dir / "shadow_decisions.jsonl",
+        "lock": worker_dir / "worker.lock",
+        "tasks": worker_dir / "tasks.jsonl",
+    }
+
+
+def _atomic_json_write(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _load_json_or_default(path: Path, default: dict) -> dict:
+    if not path.exists():
+        return dict(default)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else dict(default)
+    except (OSError, json.JSONDecodeError):
+        return dict(default)
+
+
+def _worker_lock_is_stale(path: Path) -> bool:
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+        os.kill(pid, 0)
+        return False
+    except (FileNotFoundError, ProcessLookupError, ValueError):
+        return True
+    except PermissionError:
+        return False
+
+
+def acquire_worker_lock(state_dir: Path) -> Path:
+    paths = worker_paths(state_dir)
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    lock = paths["lock"]
+    if lock.exists() and _worker_lock_is_stale(lock):
+        lock.unlink()
+    try:
+        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        raise SystemExit(f"Worker already running for state dir: {state_dir.expanduser()}")
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+    return lock
+
+
+def release_worker_lock(lock: Path) -> None:
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _read_worker_tasks(path: Path) -> tuple[list[dict], list[str]]:
+    if not path.exists():
+        return [], []
+    tasks = []
+    errors = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            task = record.get("task") or record.get("text")
+            if not isinstance(record, dict) or not isinstance(task, str) or not task.strip():
+                raise ValueError("task must be a non-empty string")
+            tasks.append({"task_id": record.get("task_id") or record.get("job_id"), "task": task})
+        except (json.JSONDecodeError, ValueError, AttributeError) as exc:
+            errors.append(f"tasks.jsonl line {number}: {exc}")
+    return tasks, errors
+
+
+def _worker_profiles(db_path: Path, validation_store: Path, ingest_store: Path, tclk_store: Path) -> tuple[dict[str, AgentProfile], list[str]]:
+    errors = []
+    observations = []
+    interactions = []
+    if db_path.exists():
+        try:
+            adapter = TechnocoreObservationAdapter(db_path)
+            observations = [obs for obs in adapter.observations() if DID_RE.match(obs.identity.did)]
+            interactions = adapter.interactions()
+        except (OSError, sqlite3.Error, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"observer DB refresh: {exc}")
+    if ingest_store.exists():
+        try:
+            observations.extend(obs for obs in ExportObservationStore(ingest_store).load() if DID_RE.match(obs.identity.did))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"Scout export refresh: {exc}")
+    validated = []
+    if validation_store.exists():
+        try:
+            validated = load_validated_evidence(validation_store)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"validation evidence refresh: {exc}")
+    settlement = []
+    if tclk_store.exists():
+        try:
+            settlement = settlement_evidence_from_tclk(TclkObservationAdapter(tclk_store).observations())
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"TCLK evidence refresh: {exc}")
+    return ProfileBuilder(observations, interactions, validated, settlement).build_all(), errors
+
+
+def _worker_evidence_snapshot(profiles: dict[str, AgentProfile]) -> str:
+    snapshot = []
+    for did in sorted(profiles):
+        profile = profiles[did]
+        snapshot.append({
+            "did": did,
+            "capabilities": [
+                {"id": cap.capability_id, "level": cap.support_level, "confidence": cap.confidence,
+                 "evidence": sorted(cap.supporting_sequence_ids)}
+                for cap in sorted(profile.capabilities, key=lambda item: item.capability_id)
+            ],
+            "validations": sorted(
+                (item.validation_provenance, item.result, item.score)
+                for items in profile.validated_capability_evidence.values() for item in items
+            ),
+            "settlement": sorted(
+                (item.contract_id, item.offer_id, item.level, item.provenance)
+                for item in profile.settlement_evidence
+            ),
+        })
+    return sha256_hex_bytes(canonical_json_bytes(snapshot))
+
+
+def _worker_record_append(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def run_worker_cycle(
+    state_dir: Path,
+    db_path: Path = DEFAULT_DB_PATH,
+    validation_store: Path = DEFAULT_VALIDATION_STORE,
+    ingest_store: Path = DEFAULT_INGEST_STORE,
+    tclk_store: Path = DEFAULT_TCLK_STORE,
+) -> dict:
+    paths = worker_paths(state_dir)
+    started = now_iso()
+    tasks, task_errors = _read_worker_tasks(paths["tasks"])
+    profiles, evidence_errors = _worker_profiles(db_path, validation_store, ingest_store, tclk_store)
+    errors = [*task_errors, *evidence_errors]
+    evidence_snapshot = _worker_evidence_snapshot(profiles)
+    prior_ids = set()
+    if paths["decisions"].exists():
+        for line in paths["decisions"].read_text(encoding="utf-8").splitlines():
+            try:
+                prior = json.loads(line)
+                if isinstance(prior, dict) and prior.get("shadow_id"):
+                    prior_ids.add(prior["shadow_id"])
+            except json.JSONDecodeError:
+                errors.append("shadow_decisions.jsonl contains malformed data")
+    produced = 0
+    suppressed = 0
+    for item in tasks:
+        task_text = item["task"]
+        task_id = item["task_id"] or task_hash(task_text)
+        routed = Router(profiles).route(task_text, top=5)
+        plan = create_execution_plan(task_text, profiles, ExecutionConstraints())
+        shadow_id = sha256_hex_bytes(canonical_json_bytes({
+            "task_id": task_id, "task_hash": task_hash(task_text),
+            "evidence_snapshot": evidence_snapshot, "policy": WORKER_POLICY_VERSION,
+        }))
+        if shadow_id in prior_ids:
+            suppressed += 1
+            continue
+        selected = [plan.worker["did"]] if plan.worker.get("did") not in {None, "none"} else []
+        decision = {
+            "schema": "flop-shadow-decision/v1",
+            "shadow_id": shadow_id,
+            "task_id": task_id,
+            "task_hash": task_hash(task_text),
+            "evidence_snapshot": evidence_snapshot,
+            "created_at": started,
+            "candidate_workers": [candidate.profile.identity.did for candidate in routed.candidates],
+            "qualification": plan.qualification,
+            "selected_agents": selected,
+            "evidence_ids": evidence_ids_for_selected_agents(profiles, selected),
+            "work_route": dict(plan.worker),
+            "settlement_plan": dict(plan.settlement_plan),
+            "verification_plan": dict(plan.verification_plan),
+            "security_policy": dict(plan.security_policy),
+            "same_operator_disclosure": same_operator_disclosures(),
+            "mode": "SHADOW",
+            "signature_present": False,
+            "network_writes": 0,
+            "private_key_accesses": 0,
+        }
+        _worker_record_append(paths["decisions"], decision)
+        prior_ids.add(shadow_id)
+        produced += 1
+    ended = now_iso()
+    cycle = {
+        "cycle_id": sha256_hex_bytes(canonical_json_bytes({"started": started, "evidence": evidence_snapshot})),
+        "started_at": started,
+        "ended_at": ended,
+        "status": "HEALTHY" if not errors else "DEGRADED",
+        "mode": "SHADOW",
+        "tasks_observed": len(tasks),
+        "shadow_decisions_produced": produced,
+        "duplicate_decisions_suppressed": suppressed,
+        "verification_evidence_count": sum(len(items) for profile in profiles.values() for items in profile.validated_capability_evidence.values()),
+        "same_operator_evidence_count": sum(1 for did in profiles if did in {SCOUT_DID, BENCH_DID, ROUTER_DID}),
+        "network_writes": 0,
+        "private_key_accesses": 0,
+        "errors": errors,
+    }
+    _worker_record_append(paths["cycles"], cycle)
+    state = _load_json_or_default(paths["state"], {})
+    state.update({
+        "mode": "SHADOW", "router_did": ROUTER_DID, "last_cycle_start": started,
+        "last_cycle_end": ended, "last_success_at": ended if not errors else state.get("last_success_at"),
+        "last_error_at": ended if errors else state.get("last_error_at"),
+        "last_error": "; ".join(errors) if errors else None,
+        "consecutive_failures": int(state.get("consecutive_failures", 0)) + 1 if errors else 0,
+        "current_backoff_seconds": state.get("current_backoff_seconds", 0),
+        "tasks_observed": len(tasks), "shadow_decisions_produced": produced,
+        "duplicate_decisions_suppressed": suppressed,
+        "verification_evidence_count": cycle["verification_evidence_count"],
+        "same_operator_evidence_count": cycle["same_operator_evidence_count"], "network_writes": 0, "private_key_accesses": 0,
+    })
+    _atomic_json_write(paths["state"], state)
+    return cycle
+
+
+def worker_once(state_dir: Path, **kwargs) -> dict:
+    lock = acquire_worker_lock(state_dir)
+    try:
+        return run_worker_cycle(state_dir, **kwargs)
+    finally:
+        release_worker_lock(lock)
+
+
+def worker_status(state_dir: Path) -> dict:
+    paths = worker_paths(state_dir)
+    state = _load_json_or_default(paths["state"], {})
+    state.setdefault("mode", "SHADOW")
+    state.setdefault("router_did", ROUTER_DID)
+    state["running"] = paths["lock"].exists() and not _worker_lock_is_stale(paths["lock"])
+    state.setdefault("network_writes", 0)
+    state.setdefault("private_key_accesses", 0)
+    return state
+
+
+def print_worker_status(state_dir: Path) -> None:
+    status = worker_status(state_dir)
+    print("FLOP Router worker status")
+    print("-------------------------")
+    for key in ("running", "mode", "router_did", "last_cycle_start", "last_cycle_end", "last_success_at", "last_error_at", "last_error", "consecutive_failures", "current_backoff_seconds", "tasks_observed", "shadow_decisions_produced", "duplicate_decisions_suppressed", "verification_evidence_count", "same_operator_evidence_count", "network_writes", "private_key_accesses"):
+        print(f"{key}: {status.get(key)}")
+
+
+def run_worker_loop(state_dir: Path, poll_interval: float, max_backoff: float, **kwargs) -> int:
+    lock = acquire_worker_lock(state_dir)
+    stop = False
+
+    def request_stop(_signum, _frame):
+        nonlocal stop
+        stop = True
+
+    previous_handlers = {}
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous_handlers[signum] = signal.signal(signum, request_stop)
+    try:
+        failures = 0
+        while not stop:
+            try:
+                cycle = run_worker_cycle(state_dir, **kwargs)
+            except Exception as exc:
+                now = now_iso()
+                cycle = {
+                    "started_at": now, "ended_at": now, "status": "DEGRADED",
+                    "errors": [f"worker cycle: {exc}"], "tasks_observed": 0,
+                    "shadow_decisions_produced": 0, "duplicate_decisions_suppressed": 0,
+                    "network_writes": 0, "private_key_accesses": 0,
+                }
+            if cycle["status"] == "HEALTHY":
+                failures = 0
+                delay = max(0.0, poll_interval)
+            else:
+                failures += 1
+                delay = min(max(0.0, max_backoff), max(0.0, poll_interval) * (2 ** min(failures - 1, 20)))
+            state = worker_status(state_dir)
+            state["current_backoff_seconds"] = delay
+            _atomic_json_write(worker_paths(state_dir)["state"], state)
+            if not stop and delay:
+                time.sleep(delay)
+        return 0
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        release_worker_lock(lock)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only Agent Router Prototype")
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Read-only observer SQLite snapshot")
@@ -5267,6 +5577,18 @@ def main() -> None:
     identity_sub.add_parser("init")
     identity_sub.add_parser("verify")
     identity_sub.add_parser("show")
+    worker = sub.add_parser("worker")
+    worker_sub = worker.add_subparsers(dest="worker_command", required=True)
+    worker_run = worker_sub.add_parser("run")
+    worker_run.add_argument("--state-dir", type=Path, default=argparse.SUPPRESS)
+    worker_run.add_argument("--poll-interval", type=float, default=60.0)
+    worker_run.add_argument("--max-backoff", type=float, default=300.0)
+    worker_run.add_argument("--shadow", action="store_true")
+    worker_once_parser = worker_sub.add_parser("once")
+    worker_once_parser.add_argument("--state-dir", type=Path, default=argparse.SUPPRESS)
+    worker_once_parser.add_argument("--shadow", action="store_true")
+    worker_status_parser = worker_sub.add_parser("status")
+    worker_status_parser.add_argument("--state-dir", type=Path, default=argparse.SUPPRESS)
     args = parser.parse_args()
     db_path = Path(args.db)
     validation_store = Path(args.validation_store)
@@ -5274,6 +5596,35 @@ def main() -> None:
     tclk_store = Path(args.tclk_store)
     verification_evidence_store = Path(args.verification_evidence_store)
     state_dir = Path(args.state_dir)
+
+    if args.command == "worker":
+        if args.worker_command == "status":
+            print_worker_status(state_dir)
+            return
+        if not args.shadow:
+            raise SystemExit("worker commands require --shadow.")
+        if args.worker_command == "once":
+            cycle = worker_once(
+                state_dir,
+                db_path=db_path,
+                validation_store=validation_store,
+                ingest_store=ingest_store,
+                tclk_store=tclk_store,
+            )
+            print(json.dumps(cycle, indent=2, sort_keys=True))
+            return
+        if args.poll_interval <= 0 or args.max_backoff <= 0:
+            raise SystemExit("poll interval and max backoff must be positive.")
+        run_worker_loop(
+            state_dir,
+            args.poll_interval,
+            args.max_backoff,
+            db_path=db_path,
+            validation_store=validation_store,
+            ingest_store=ingest_store,
+            tclk_store=tclk_store,
+        )
+        return
 
     if args.command == "inspect-data":
         print_inspect(db_path)
