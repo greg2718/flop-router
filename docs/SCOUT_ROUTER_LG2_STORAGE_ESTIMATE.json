@@ -1,0 +1,234 @@
+{
+  "ddl_sha256": "b3e39648e0019f490b19bd15a1e36a0e93a05261d7d0c55fce6bdb8e085356e8",
+  "reproduction_source": "import sqlite3,tempfile,hashlib,json\nfrom pathlib import Path\nrepo=Path('/Users/greg/Dev/flop-router')\nsql=(repo/'docs/router-legacy-generation-lg2-schema.sql').read_text()\nresults=[]\nfor n in (1000,10000,100000,161073):\n for locator_bytes in (0,64):\n  with tempfile.TemporaryDirectory(prefix='lg2-contract-',dir='/private/tmp') as t:\n   db=sqlite3.connect(str(Path(t)/'model.sqlite'))\n   db.executescript('PRAGMA page_size=4096;PRAGMA foreign_keys=ON;CREATE TABLE messages(projection_row_id TEXT PRIMARY KEY);'+sql)\n   # No production records: stable synthetic binary identities; model 32,890/161,073 extra witnesses.\n   extra=round(n*32890/161073)\n   for start in range(0,n,500):\n    values=[]; reports=[];witnesses=[]\n    for i in range(start,min(start+500,n)):\n     raw=hashlib.sha256(('raw-'+str(i)).encode()).digest()\n     values.append(('sm1:'+raw.hex(),));reports.append((raw,i%2))\n     for kind in (1,2) if i<extra else (1,):\n      digest=hashlib.sha256((str(kind)+'-cache-'+str(i)).encode()).digest()\n      locator='' if not locator_bytes else hashlib.sha256(('locator-'+str(kind)+'-'+str(i)).encode()).hexdigest()\n      witnesses.append((raw,kind,digest,locator))\n    db.executemany('INSERT INTO messages VALUES (?)',values)\n    db.executemany('INSERT INTO legacy_generation_reports(raw_ref,reported_code) VALUES (?,?)',reports)\n    db.executemany('INSERT INTO legacy_generation_witnesses VALUES (?,?,?,?)',witnesses)\n   db.commit()\n   assert db.execute('PRAGMA integrity_check').fetchall()==[('ok',)]\n   assert not db.execute('PRAGMA foreign_key_check').fetchall()\n   stats=db.execute(\"SELECT name,sum(pgsize),sum(payload) FROM dbstat WHERE name IN ('legacy_generation_reports','legacy_generation_witnesses') GROUP BY name\").fetchall()\n   pages=sum(x[1] for x in stats);payload=sum(x[2] for x in stats)\n   results.append(dict(rows=n,witnesses=n+extra,explicit_locator_bytes=locator_bytes,table_bytes=pages,record_payload_bytes=payload,sqlite_overhead_bytes=pages-payload,bytes_per_row=pages/n,tables=stats))\n   db.close()\nprint(json.dumps(dict(scope='Synthetic compact-table allocation model, not full projection or production qualification. 4096-byte pages, no VACUUM, SHA-random synthetic keys. Model witness multiplicity 1+32890/161073. Parent messages storage excluded: unchanged shared data.',sqlite_version=sqlite3.sqlite_version,ddl_sha256=hashlib.sha256(sql.encode()).hexdigest(),results=results),indent=2))\n",
+  "reproduction_source_sha256": "afcf33237fde37c135c0fb5feda5935460cb59cf528c704a784858119612f1bf",
+  "results": [
+    {
+      "bytes_per_row": 147.456,
+      "comparison_lg1_estimated_total_added_bytes": 960248.1755428571,
+      "comparison_lg1_json_payload_bytes": 942920,
+      "control_bytes": 1396736,
+      "control_is_extrapolated": false,
+      "estimated_delta_percent": 11.143695014662757,
+      "estimated_total_added_bytes": 155648,
+      "explicit_locator_bytes": 0,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 118280,
+      "rows": 1000,
+      "sqlite_overhead_bytes": 29176,
+      "table_bytes": 147456,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          45056,
+          35000
+        ],
+        [
+          "legacy_generation_witnesses",
+          102400,
+          83280
+        ]
+      ],
+      "witnesses": 1204
+    },
+    {
+      "bytes_per_row": 249.856,
+      "comparison_lg1_estimated_total_added_bytes": 960248.1755428571,
+      "comparison_lg1_json_payload_bytes": 942920,
+      "control_bytes": 1396736,
+      "control_is_extrapolated": false,
+      "estimated_delta_percent": 18.475073313782993,
+      "estimated_total_added_bytes": 258048,
+      "explicit_locator_bytes": 64,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 196540,
+      "rows": 1000,
+      "sqlite_overhead_bytes": 53316,
+      "table_bytes": 249856,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          45056,
+          35000
+        ],
+        [
+          "legacy_generation_witnesses",
+          204800,
+          161540
+        ]
+      ],
+      "witnesses": 1204
+    },
+    {
+      "bytes_per_row": 141.312,
+      "comparison_lg1_estimated_total_added_bytes": 9602950.208914286,
+      "comparison_lg1_json_payload_bytes": 9429660,
+      "control_bytes": 13189120,
+      "control_is_extrapolated": false,
+      "estimated_delta_percent": 10.77639751552795,
+      "estimated_total_added_bytes": 1421312,
+      "explicit_locator_bytes": 0,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 1182940,
+      "rows": 10000,
+      "sqlite_overhead_bytes": 230180,
+      "table_bytes": 1413120,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          430080,
+          350000
+        ],
+        [
+          "legacy_generation_witnesses",
+          983040,
+          832940
+        ]
+      ],
+      "witnesses": 12042
+    },
+    {
+      "bytes_per_row": 236.7488,
+      "comparison_lg1_estimated_total_added_bytes": 9602950.208914286,
+      "comparison_lg1_json_payload_bytes": 9429660,
+      "control_bytes": 13189120,
+      "control_is_extrapolated": false,
+      "estimated_delta_percent": 18.012422360248447,
+      "estimated_total_added_bytes": 2375680,
+      "explicit_locator_bytes": 64,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 1965670,
+      "rows": 10000,
+      "sqlite_overhead_bytes": 401818,
+      "table_bytes": 2367488,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          430080,
+          350000
+        ],
+        [
+          "legacy_generation_witnesses",
+          1937408,
+          1615670
+        ]
+      ],
+      "witnesses": 12042
+    },
+    {
+      "bytes_per_row": 141.47584,
+      "comparison_lg1_estimated_total_added_bytes": 96029267.86240001,
+      "comparison_lg1_json_payload_bytes": 94296370,
+      "control_bytes": 131665920,
+      "control_is_extrapolated": false,
+      "estimated_delta_percent": 10.751283247783482,
+      "estimated_total_added_bytes": 14155776,
+      "explicit_locator_bytes": 0,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 11829330,
+      "rows": 100000,
+      "sqlite_overhead_bytes": 2318254,
+      "table_bytes": 14147584,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          4280320,
+          3500000
+        ],
+        [
+          "legacy_generation_witnesses",
+          9867264,
+          8329330
+        ]
+      ],
+      "witnesses": 120419
+    },
+    {
+      "bytes_per_row": 236.25728,
+      "comparison_lg1_estimated_total_added_bytes": 96029267.86240001,
+      "comparison_lg1_json_payload_bytes": 94296370,
+      "control_bytes": 131665920,
+      "control_is_extrapolated": false,
+      "estimated_delta_percent": 17.94991445014777,
+      "estimated_total_added_bytes": 23633920,
+      "explicit_locator_bytes": 64,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 19656565,
+      "rows": 100000,
+      "sqlite_overhead_bytes": 3969163,
+      "table_bytes": 23625728,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          4280320,
+          3500000
+        ],
+        [
+          "legacy_generation_witnesses",
+          19345408,
+          16156565
+        ]
+      ],
+      "witnesses": 120419
+    },
+    {
+      "bytes_per_row": 140.90465813637294,
+      "comparison_lg1_estimated_total_added_bytes": 154677340.70473143,
+      "comparison_lg1_json_payload_bytes": 151886108,
+      "control_bytes": 212078247.3216,
+      "control_is_extrapolated": true,
+      "estimated_delta_percent": 10.705543018549646,
+      "estimated_total_added_bytes": 22704128,
+      "explicit_locator_bytes": 0,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 19053892,
+      "rows": 161073,
+      "sqlite_overhead_bytes": 3642044,
+      "table_bytes": 22695936,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          6811648,
+          5637555
+        ],
+        [
+          "legacy_generation_witnesses",
+          15884288,
+          13416337
+        ]
+      ],
+      "witnesses": 193963
+    },
+    {
+      "bytes_per_row": 235.8582754403283,
+      "comparison_lg1_estimated_total_added_bytes": 154677340.70473143,
+      "comparison_lg1_json_payload_bytes": 151886108,
+      "control_bytes": 212078247.3216,
+      "control_is_extrapolated": true,
+      "estimated_delta_percent": 17.917251052333587,
+      "estimated_total_added_bytes": 37998592,
+      "explicit_locator_bytes": 64,
+      "fixed_metadata_allowance": 8192,
+      "record_payload_bytes": 31661487,
+      "rows": 161073,
+      "sqlite_overhead_bytes": 6328913,
+      "table_bytes": 37990400,
+      "tables": [
+        [
+          "legacy_generation_reports",
+          6811648,
+          5637555
+        ],
+        [
+          "legacy_generation_witnesses",
+          31178752,
+          26023932
+        ]
+      ],
+      "witnesses": 193963
+    }
+  ],
+  "scope": "Synthetic compact-table allocation model, not full projection or production qualification. 4096-byte pages, no VACUUM, SHA-random synthetic keys. Model witness multiplicity 1+32890/161073. Parent messages storage excluded: unchanged shared data.",
+  "sqlite_version": "3.53.4",
+  "validation": "DDL, virtual decoding, explicit bulk report/message binding, witness FK, enum/length rejection, integrity: PASS. Synthetic allocation only; no runtime qualification."
+}

@@ -10,7 +10,13 @@ import math
 import os
 import re
 import signal
+import stat
+import threading
+from contextlib import contextmanager, nullcontext
 import sqlite3
+import sys
+import scout_snapshot
+import scout_projection
 import time
 import unicodedata
 import urllib.error
@@ -20,6 +26,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import combinations
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -580,6 +587,17 @@ EVALUATION_TASKS = [
 
 
 def normalize_text(text: str) -> str:
+    # Bound retained input bytes as well as entry count. Long hostile messages
+    # are processed normally, never retained in this process-wide cache.
+    return _normalized_small(text) if len(text) <= 8192 else _normalize_text(text)
+
+
+@lru_cache(maxsize=128)
+def _normalized_small(text: str) -> str:
+    return _normalize_text(text)
+
+
+def _normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"https?://\S+|www\.\S+", "<url>", text, flags=re.I)
     text = re.sub(r"\s+", " ", text).strip().casefold()
@@ -1586,18 +1604,32 @@ def provenance_quality_score(status: str) -> float:
     }.get(status, 0.0)
 
 
-def pattern_matches(text: str, pattern: str) -> bool:
+@lru_cache(maxsize=1024)
+def _capability_pattern(pattern: str):
     pattern = pattern.casefold()
     if re.search(r"^[a-z0-9][a-z0-9_ -]*[a-z0-9]$", pattern):
         expr = r"(?<![a-z0-9])" + re.escape(pattern).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
-        return bool(re.search(expr, text))
-    return pattern in text
+        return pattern, re.compile(expr)
+    return pattern, None
+
+
+def pattern_matches(text: str, pattern: str) -> bool:
+    literal, compiled = _capability_pattern(pattern)
+    # All callers pass Router-normalized text (single ASCII spaces).
+    # The literal prefilter avoids scanning long irrelevant text with regexes.
+    if literal not in text:
+        return False
+    return bool(compiled.search(text)) if compiled is not None else True
 
 
 def is_template_or_noise(text: str, duplicate_count: int = 1, template_dids: int = 1) -> bool:
-    t = normalize_text(text)
     if duplicate_count > 1 or template_dids > 1:
         return True
+    t = normalize_text(text)
+    if not any(term in t for term in ('checking in', 'check-in', 'daily check', 'present and signed',
+            'autonomous agent active', 'ready for', 'airdrop', 'snapshot', 'referral', 'promo', 'claim',
+            'powered by', 'node synced', 'signed', 'hello', 'maintained before', 'did')):
+        return False
     noise_patterns = (
         r"\b(checking in|check-in|daily check|present and signed|autonomous agent active|ready for \$flop)\b",
         r"\b(airdrop|snapshot|referral|promo|claim|powered by)\b",
@@ -1608,7 +1640,10 @@ def is_template_or_noise(text: str, duplicate_count: int = 1, template_dids: int
 
 
 def is_promotional(text: str) -> bool:
-    return bool(re.search(r"\b(airdrop|claim|snapshot|referral|promo|ready for \$flop|expert for hire|hire me)\b", normalize_text(text)))
+    t = normalize_text(text)
+    if not any(term in t for term in ('airdrop','claim','snapshot','referral','promo','ready for','expert for hire','hire me')):
+        return False
+    return bool(re.search(r"\b(airdrop|claim|snapshot|referral|promo|ready for \$flop|expert for hire|hire me)\b", t))
 
 
 def is_substantive(text: str) -> bool:
@@ -1652,6 +1687,8 @@ def self_asserted_capability_claim(text: str) -> bool:
 
 def testing_behavior_context(text: str) -> str:
     t = normalize_text(text)
+    if not any(word in t for word in ('test', 'reproduc', 'fixture', 'regression', 'assert', 'bug report', 'edge case')):
+        return "none"
     if re.search(r"\b(workflow|documentation|docs|setup|steps|guide|explainer|onboarding)\b", t):
         return "none"
     if re.search(r"\b(consensus validation|cross-attest|attest|attestation|compute result|proof|validated by|cryptographic verification|verify your did)\b", t):
@@ -1669,6 +1706,10 @@ def testing_behavior_context(text: str) -> str:
 
 def debugging_behavior_context(text: str) -> str:
     t = normalize_text(text)
+    if not any(word in t for word in ('debug', 'fail', 'error', 'bug', 'http', '403', '429', 'nonce', 'stack trace', 'root cause',
+                                     'traced', 'diagnosed', 'isolated', 'fixed', 'payload', 'response',
+                                     'i can', 'happy to', 'available to', 'looking for', 'my agent specializes', 'specializes in', 'can help', 'for hire')):
+        return "none"
     if self_asserted_capability_claim(t) and not re.search(r"\b(traced|diagnosed|isolated|root cause|debugged|fixed|reproduced)\b", t):
         return "signal"
     if (
@@ -1692,6 +1733,8 @@ def debugging_behavior_context(text: str) -> str:
 
 def signed_post_behavior_context(text: str) -> str:
     t = normalize_text(text)
+    if not any(word in t for word in ('signed post', 'signed write', 'signer', 'signature', 'nonce', 'ed25519')):
+        return "none"
     if re.search(r"\b(signed post|signed write|signed writes|signer|signature|nonce|ed25519)\b", t) and re.search(
         r"\b(verified|handles|flowing|monotonic|increment|payload|http \d{3}|returned|reused|reuse|failure)\b", t
     ):
@@ -1731,8 +1774,9 @@ def raw_capability_evidence_decision(
     obs: AgentObservation,
     rule: CapabilityRule,
     duplicate_count: int,
+    evidence: EvidenceItem | None = None,
 ) -> CapabilityEvidenceDecision:
-    evidence = assess_evidence(obs, duplicate_count=duplicate_count)
+    evidence = evidence if evidence is not None else assess_evidence(obs, duplicate_count=duplicate_count)
     text = normalize_text(obs.text)
     matched = [pattern for pattern in rule.strong_patterns if pattern_matches(text, pattern)]
     weak_matched = [pattern for pattern in rule.weak_patterns if pattern_matches(text, pattern)]
@@ -1867,6 +1911,8 @@ def capability_evidence_decisions(
     observations: Iterable[AgentObservation],
     capability_id: str,
     duplicate_counts: Counter[str] | None = None,
+    check=None,
+    assessed=None,
 ) -> list[CapabilityEvidenceDecision]:
     rule = next((rule for rule in CAPABILITY_RULES if rule.capability_id == capability_id), None)
     if not rule:
@@ -1875,8 +1921,11 @@ def capability_evidence_decisions(
     duplicate_counts = duplicate_counts or Counter(template_count_key(obs) for obs in observations)
     decisions = []
     seen_templates: set[str] = set()
-    for obs in observations:
-        decision = raw_capability_evidence_decision(obs, rule, duplicate_counts[template_count_key(obs)])
+    for index, obs in enumerate(observations):
+        if check is not None and index % 128 == 0:
+            check()
+        decision = raw_capability_evidence_decision(obs, rule, duplicate_counts[template_count_key(obs)],
+                                                   assessed.get(id(obs)) if assessed is not None else None)
         template_key = f"{obs.room}:{obs.generation}:{obs.template_hash or decision.observation_id}"
         if decision.support_contribution != "NONE":
             if template_key in seen_templates:
@@ -1890,6 +1939,75 @@ def capability_evidence_decisions(
                 seen_templates.add(template_key)
         decisions.append(decision)
     return decisions
+
+
+@lru_cache(maxsize=128)
+def _small_semantic_decisions(text, duplicate, template_shared, verification):
+    """Content-only memo: provenance is attached afresh to every observation.
+
+    Boolean multiplicity is sufficient for assess_evidence's exact predicates.
+    Never key by the producer's template hash or capability classification.
+    """
+    obs = AgentObservation(AgentIdentity(""), "", 0, None, text, "", "", True,
+                           template_dids=2 if template_shared else 1,
+                           verification_status=verification)
+    normalized = normalize_text(text)
+    words = set(re.findall('[a-z0-9]+', normalized))
+    by_word, unrestricted, contextual = _semantic_rule_index()
+    matched = {i for i in contextual
+               if capability_behavior_context(CAPABILITY_RULES[i].capability_id, text) not in {"generic", "none"}}
+    for i, pattern in unrestricted:
+        if i not in matched and pattern_matches(normalized, pattern): matched.add(i)
+    for word in words:
+        for i, pattern in by_word.get(word, ()):
+            if i not in matched and pattern_matches(normalized, pattern): matched.add(i)
+    relevant_rules = [CAPABILITY_RULES[i] for i in sorted(matched)]
+    if not relevant_rules:
+        return ()
+    evidence = assess_evidence(obs, 2 if duplicate else 1)
+    return tuple(raw_capability_evidence_decision(obs, rule, 2 if duplicate else 1, evidence)
+                 for rule in relevant_rules)
+
+
+@lru_cache(maxsize=1024)
+def _pattern_first_word(pattern):
+    # Only the boundary-enforced alphanumeric phrase branch permits this filter.
+    literal, compiled = _capability_pattern(pattern)
+    return re.match('[a-z0-9]+', literal)[0] if compiled is not None else None
+
+
+@lru_cache(maxsize=1)
+def _semantic_rule_index():
+    """Index the fixed Router rules; a hit still requires the exact matcher.
+
+    Regex patterns without a necessary literal word are always considered.
+    This cache contains rules only, never producer labels or message text.
+    """
+    by_word, unrestricted, contextual = {}, [], []
+    for i, rule in enumerate(CAPABILITY_RULES):
+        if rule.capability_id in {'software.testing', 'software.debugging', 'technocore.signed_post'}:
+            contextual.append(i)
+        for pattern in rule.strong_patterns + rule.weak_patterns:
+            word = _pattern_first_word(pattern)
+            if word is None: unrestricted.append((i, pattern))
+            else: by_word.setdefault(word, []).append((i, pattern))
+    return by_word, unrestricted, contextual
+
+
+def semantic_decisions(obs, duplicate_count):
+    if len(obs.text) > 8192:
+        evidence = assess_evidence(obs, duplicate_count)
+        return [raw_capability_evidence_decision(obs, rule, duplicate_count, evidence)
+                for rule in CAPABILITY_RULES]
+    prepared = _small_semantic_decisions(obs.text, duplicate_count > 1, obs.template_dids > 1,
+                                         obs.verification_status)
+    # Rebind all provenance, including a distinct composite hash and generation.
+    return [replace(d, observation_id=obs.location_id, evidence=replace(d.evidence,
+        room=obs.room, seq=obs.sequence_id, timestamp=obs.server_timestamp or obs.timestamp,
+        sequence_id=obs.location_id, generation=obs.generation, did=obs.identity.did,
+        nonce=obs.nonce, sig=obs.sig, message_hash=obs.message_hash,
+        source_export_hash=obs.source_export_hash, source_export_path=obs.source_export_path,
+        evidence_id=obs.evidence_id)) for d in prepared if d.relevant]
 
 
 def specificity_score(text: str) -> float:
@@ -2605,14 +2723,13 @@ class TclkObservationAdapter:
             role=record.get("role"),
         )
 
-    def observations(self) -> list[TclkObservation]:
-        if not self.path.exists():
-            return []
+    def observations(self, records: list[dict] | None = None) -> list[TclkObservation]:
+        if records is None:
+            if not self.path.exists():
+                return []
+            records = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
         observations = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
+        for record in records:
             if "rail" in record and "room" not in record and "seq" not in record:
                 observations.append(self._hint_observation(record))
                 continue
@@ -3056,25 +3173,36 @@ class TechnocoreObservationAdapter:
 
 
 class CapabilityInferer:
+    def __init__(self, check=None):
+        self.check = check
+
     def infer(self, observations: Iterable[AgentObservation]) -> list[AgentCapability]:
         hits: dict[str, list[EvidenceItem]] = defaultdict(list)
         weak_hits: dict[str, list[EvidenceItem]] = defaultdict(list)
         contradictions: dict[str, list[str]] = defaultdict(list)
         observations = list(observations)
         duplicate_counts = Counter(template_count_key(obs) for obs in observations)
+        seen_templates = defaultdict(set)
         for obs in observations:
+            if self.check is not None:
+                self.check()
             text = normalize_text(obs.text)
             if re.search(r"\b(not|no|never)\s+(solidity|smart contract|python|testing|technocore)\b", text):
                 contradictions["security.general"].append(obs.location_id)
-        for rule in CAPABILITY_RULES:
-            for decision in capability_evidence_decisions(observations, rule.capability_id, duplicate_counts):
+            for decision in semantic_decisions(obs, duplicate_counts[template_count_key(obs)]):
                 if not decision.relevant:
                     continue
+                key = f"{obs.room}:{obs.generation}:{obs.template_hash or decision.observation_id}"
+                if decision.support_contribution != "NONE":
+                    if key in seen_templates[decision.capability_id]:
+                        continue
+                    seen_templates[decision.capability_id].add(key)
                 if decision.support_contribution in {"LIMITED", "STRONG"}:
-                    hits[rule.capability_id].append(decision.evidence)
+                    hits[decision.capability_id].append(decision.evidence)
                 elif decision.support_contribution == "SIGNAL":
-                    weak_hits[rule.capability_id].append(decision.evidence)
+                    weak_hits[decision.capability_id].append(decision.evidence)
 
+        self.low_quality_signals = {key: len({item.sequence_id for item in items}) for key, items in weak_hits.items()}
         capabilities = []
         all_capability_ids = set(hits) | set(weak_hits)
         for capability_id in all_capability_ids:
@@ -3143,7 +3271,10 @@ class ProfileBuilder:
         interactions: Iterable[sqlite3.Row] = (),
         validated_evidence: Iterable[ValidatedCapabilityEvidence] = (),
         settlement_evidence: Iterable[SettlementEvidence] = (),
+        *, canonical_order: bool = False, check=None,
     ):
+        self.check = check
+        self.canonical_order = canonical_order
         self.observations = observations
         self.interactions = list(interactions)
         self.validated_by_did: dict[str, dict[str, list[ValidatedCapabilityEvidence]]] = defaultdict(lambda: defaultdict(list))
@@ -3152,7 +3283,7 @@ class ProfileBuilder:
         self.settlement_by_did: dict[str, list[SettlementEvidence]] = defaultdict(list)
         for evidence in settlement_evidence:
             self.settlement_by_did[evidence.did].append(evidence)
-        self.inferer = CapabilityInferer()
+        self.inferer = CapabilityInferer(check)
         self.by_did: dict[str, list[AgentObservation]] = defaultdict(list)
         for obs in observations:
             self.by_did[obs.identity.did].append(obs)
@@ -3178,7 +3309,10 @@ class ProfileBuilder:
             responded_to[source].add(target)
             direct_evidence[source].append(f"{source} -> {target} ({row['relationship_type']})")
         profiles = {}
+        direct_supported = self._direct_interactions_supported()
         for did, obs in self.by_did.items():
+            if self.check is not None:
+                self.check()
             reciprocal = {
                 peer for peer in responded_to[did]
                 if did in responded_to.get(peer, set())
@@ -3189,7 +3323,7 @@ class ProfileBuilder:
                 peers[did],
                 responders[did],
                 responded_to[did],
-                len(reciprocal) if self._direct_interactions_supported() else None,
+                len(reciprocal) if direct_supported else None,
                 direct_evidence[did],
             )
         return profiles
@@ -3206,26 +3340,45 @@ class ProfileBuilder:
         responded_to: set[str],
         reciprocity: int | None,
         direct_evidence: list[str],
+        summary=None,
     ) -> AgentProfile:
-        observations = sorted(observations, key=lambda o: (o.timestamp or "", o.room, o.sequence_id))
-        duplicate_counts = Counter(template_count_key(obs) for obs in observations)
-        noise = [
-            obs for obs in observations
-            if is_template_or_noise(
-                obs.text,
-                duplicate_count=duplicate_counts[template_count_key(obs)],
-                template_dids=getattr(obs, "template_dids", 1),
-            )
-        ]
-        originals = [obs for obs in observations if obs not in noise and is_substantive(obs.text)]
-        capabilities = self.inferer.infer(observations)
-        low_quality_signals = self._low_quality_capability_signals(observations, duplicate_counts)
-        message_count = len(observations)
-        original_count = len(originals)
-        template_count = len(noise)
-        originality_ratio = original_count / max(1, message_count)
-        template_ratio = template_count / max(1, message_count)
-        promo_ratio = sum(1 for obs in observations if is_promotional(obs.text)) / max(1, message_count)
+        if summary is None:
+            observations = sorted(observations, key=(lambda o: (o.room, o.generation, o.sequence_id))
+                                  if self.canonical_order else (lambda o: (o.timestamp or "", o.room, o.sequence_id)))
+            duplicate_counts = Counter(template_count_key(obs) for obs in observations)
+            noise = [
+                obs for obs in observations
+                if is_template_or_noise(
+                    obs.text,
+                    duplicate_count=duplicate_counts[template_count_key(obs)],
+                    template_dids=getattr(obs, "template_dids", 1),
+                )
+            ]
+            # Every observation is classified above; identity membership avoids an
+            # O(n^2) dataclass-equality scan on duplicate-heavy projection groups.
+            noise_ids = {id(obs) for obs in noise}
+            originals = [obs for obs in observations if id(obs) not in noise_ids and is_substantive(obs.text)]
+            capabilities = self.inferer.infer(observations)
+            low_quality_signals = self.inferer.low_quality_signals
+            message_count = len(observations)
+            original_count = len(originals)
+            template_count = len(noise)
+            originality_ratio = original_count / max(1, message_count)
+            template_ratio = template_count / max(1, message_count)
+            promo_ratio = sum(1 for obs in observations if is_promotional(obs.text)) / max(1, message_count)
+            first_timestamp = observations[0].timestamp if observations else None
+            last_timestamp = observations[-1].timestamp if observations else None
+            rooms = sorted({obs.room for obs in observations})
+            sequences = [obs.location_id for obs in originals[:10]]
+        else:
+            message_count, original_count, template_count, promo_count = summary["counts"]
+            capabilities = summary["capabilities"]
+            low_quality_signals = {cap.capability_id: cap.signal_observation_count for cap in capabilities if cap.signal_observation_count}
+            originality_ratio = original_count / max(1, message_count)
+            template_ratio = template_count / max(1, message_count)
+            promo_ratio = promo_count / max(1, message_count)
+            first_timestamp, last_timestamp = summary["timestamps"]
+            rooms, sequences = summary["rooms"], summary["sequences"]
         cap_evidence_total = sum(c.supporting_observation_count for c in capabilities)
         component_scores = {
             "identity_continuity": min(1.0, math.log1p(message_count) / math.log(25)),
@@ -3234,7 +3387,7 @@ class ProfileBuilder:
             "capability_evidence": min(1.0, cap_evidence_total / 12),
             "independent_peer_breadth": min(1.0, len(peers) / 10),
             "reciprocity": 0.0 if reciprocity is None else min(1.0, reciprocity / 5),
-            "activity_recency": recency_score(observations[-1].timestamp if observations else None),
+            "activity_recency": recency_score(last_timestamp),
             "template_risk": template_ratio,
             "promotion_risk": promo_ratio,
             "sybil_cluster_risk": 0.0 if len(peers) > 3 or message_count < 4 else 0.35,
@@ -3254,19 +3407,19 @@ class ProfileBuilder:
         )
         return AgentProfile(
             identity=AgentIdentity(did=did),
-            first_observed_timestamp=observations[0].timestamp if observations else None,
-            last_observed_timestamp=observations[-1].timestamp if observations else None,
+            first_observed_timestamp=first_timestamp,
+            last_observed_timestamp=last_timestamp,
             message_count=message_count,
             original_message_count=original_count,
             template_noise_message_count=template_count,
-            rooms_observed=sorted({obs.room for obs in observations}),
+            rooms_observed=rooms,
             capabilities=capabilities,
             distinct_signed_peers_observed_nearby=len(peers),
             likely_responders=responders,
             reciprocity_evidence=reciprocity,
             spam_template_ratio=round(template_ratio, 3),
-            activity_recency=age_label(observations[-1].timestamp if observations else None),
-            evidence_sequences=[obs.location_id for obs in originals[:10]],
+            activity_recency=age_label(last_timestamp),
+            evidence_sequences=sequences,
             trust_evidence=trust,
             low_quality_capability_signals=low_quality_signals,
             direct_interaction_evidence=direct_evidence,
@@ -3281,7 +3434,7 @@ class ProfileBuilder:
     ) -> dict[str, int]:
         signals: dict[str, set[str]] = defaultdict(set)
         for rule in CAPABILITY_RULES:
-            for decision in capability_evidence_decisions(observations, rule.capability_id, duplicate_counts):
+            for decision in capability_evidence_decisions(observations, rule.capability_id, duplicate_counts, self.check):
                 if decision.relevant and decision.support_contribution == "SIGNAL":
                     signals[rule.capability_id].add(decision.evidence.sequence_id)
         return {capability_id: len(keys) for capability_id, keys in signals.items()}
@@ -3447,21 +3600,24 @@ class Router:
 
     def route(self, task_text: str, top: int = 5) -> RoutingResult:
         task = analyze_task(task_text)
-        candidates = [self.score_candidate(task, profile) for profile in self.profiles.values()]
-        credible = [c for c in candidates if c.qualification == "CREDIBLE"]
-        partial = [
-            replace(c, qualification="PARTIAL")
-            for c in candidates
-            if c.qualification == "PARTIAL" or "REQUIRED_CAPABILITY_MISSING" in c.reason_codes
-        ]
-        credible.sort(key=lambda c: (-c.score, -len(c.supported_required), c.profile.identity.did))
-        partial.sort(key=lambda c: (-len(c.supported_required), -c.score, c.profile.identity.did))
+        credible, partial = [], []
+        has_credible = False
+        limit = top if top >= 0 else len(self.profiles)  # Preserve legacy negative slicing for non-worker callers.
+        credible_key = lambda c: (-c.score, -len(c.supported_required), c.profile.identity.did)
+        partial_key = lambda c: (-len(c.supported_required), -c.score, c.profile.identity.did)
+        for profile in self.profiles.values():
+            candidate = self.score_candidate(task, profile)
+            if candidate.qualification == "CREDIBLE":
+                has_credible = True
+                credible.append(candidate); credible.sort(key=credible_key); del credible[limit:]
+            if candidate.qualification == "PARTIAL" or "REQUIRED_CAPABILITY_MISSING" in candidate.reason_codes:
+                partial.append(replace(candidate, qualification="PARTIAL")); partial.sort(key=partial_key); del partial[limit:]
         return RoutingResult(
             task=task,
             candidates=credible[:top],
             weights=self.weights,
             partial_candidates=partial[:top],
-            status="OK" if credible else "NO_QUALIFIED_ROUTE",
+            status="OK" if has_credible else "NO_QUALIFIED_ROUTE",
         )
 
     def score_candidate(self, task: Task, profile: AgentProfile) -> RoutingCandidate:
@@ -5122,11 +5278,12 @@ def verify_evidence_consistency(
     return verify_observations_consistency(observations, adapter.interactions(), "observer_db")
 
 
-WORKER_POLICY_VERSION = "flop-router-shadow/v1"
+WORKER_POLICY_VERSION = "flop-router-shadow/v4-v2-a1-stream"
+WORKER_IDLE_LOG_SECONDS = 900.0
 
 
 def worker_paths(state_dir: Path) -> dict[str, Path]:
-    worker_dir = state_dir.expanduser() / "worker"
+    worker_dir = state_dir.expanduser().resolve() / "worker"
     return {
         "dir": worker_dir,
         "state": worker_dir / "worker_state.json",
@@ -5138,20 +5295,35 @@ def worker_paths(state_dir: Path) -> dict[str, Path]:
 
 
 def _atomic_json_write(path: Path, value: dict) -> None:
+    import tempfile
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    fd, name = tempfile.mkstemp(prefix=".state-",dir=path.parent)
+    try:
+        with os.fdopen(fd,"w",encoding="utf-8") as handle:
+            json.dump(value,handle,indent=2,sort_keys=True,allow_nan=False)
+            handle.write("\n"); handle.flush(); os.fsync(handle.fileno())
+        os.replace(name,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        Path(name).unlink(missing_ok=True)
 
 
 def _load_json_or_default(path: Path, default: dict) -> dict:
-    if not path.exists():
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        if path.name == "worker_state.json" and any((path.parent / "v2-copies").glob("*.sqlite")):
+            raise ValueError("MISSING_V2_WORKER_STATE")
         return dict(default)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else dict(default)
-    except (OSError, json.JSONDecodeError):
-        return dict(default)
+        value = scout_projection.c.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("INVALID_WORKER_STATE")
+        return value
+    except (ValueError, TypeError) as exc:
+        raise ValueError("INVALID_WORKER_STATE") from exc
 
 
 def _worker_lock_is_stale(path: Path) -> bool:
@@ -5187,77 +5359,383 @@ def release_worker_lock(lock: Path) -> None:
         pass
 
 
-def _read_worker_tasks(path: Path) -> tuple[list[dict], list[str]]:
-    if not path.exists():
-        return [], []
-    tasks = []
-    errors = []
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
+def worker_sources(state_dir: Path, scout_snapshot_root: Path | None = None,
+                   validation_store: Path | None = None, ingest_store: Path | None = None,
+                   tclk_store: Path | None = None, task_inbox: Path | None = None,
+                   max_snapshot_age: float = scout_snapshot.DEFAULT_MAX_AGE,
+                   max_snapshot_bytes: int = scout_projection.MAX_BYTES,
+                   snapshot_timeout: float = 30.0, max_projection_memory: int = scout_projection.MAX_MEMORY,
+                   activate_scout_v2: bool = False, bench_proof_store: Path | None = None, activate_scout_lg2: bool = False) -> list[dict]:
+    """None explicitly means unconfigured; workers never inherit devdata defaults."""
+    if not math.isfinite(max_snapshot_age) or max_snapshot_age <= 0:
+        raise ValueError("max snapshot age must be finite and positive")
+    if (type(max_snapshot_bytes) is not int or not 0 < max_snapshot_bytes <= scout_projection.MAX_BYTES
+            or not math.isfinite(snapshot_timeout) or snapshot_timeout <= 0
+            or type(max_projection_memory) is not int or max_projection_memory <= 0):
+        raise ValueError("Invalid projection limits; byte ceiling may not exceed 4 GiB")
+    if scout_snapshot_root is not None:
+        # Resolve only for output isolation; the reader retains the original
+        # lexical path and separately rejects symlinks instead of hiding them.
+        publication = Path(os.path.abspath(Path(scout_snapshot_root).expanduser())).resolve()
+        outputs = (worker_paths(state_dir)["dir"], Path(task_inbox).expanduser().resolve() if task_inbox else worker_paths(state_dir)["tasks"])
+        if any(path.is_relative_to(publication) for path in outputs):
+            raise ValueError("Router output paths must not be inside the Scout publication root")
+    specs = [
+        ("scout_snapshot", scout_snapshot_root, True, "scout-publication/v2-A1"),
+        ("validation_store", validation_store, False, "validation-jsonl"),
+        ("ingest_store", ingest_store, False, "observation-jsonl"),
+        ("tclk_store", tclk_store, False, "tclk-jsonl"),
+        ("task_inbox", task_inbox or worker_paths(state_dir)["tasks"], True, "task-jsonl"),
+        ("bench_proof_store", bench_proof_store, False, "router-bench-proof/v1-jsonl"),
+    ]
+    return [{
+        "name": name, "path": (os.path.abspath(Path(path).expanduser()) if name == "scout_snapshot"
+                               else str(Path(path).expanduser().resolve())) if path is not None else None,
+        "enabled": required or path is not None, "required": required, "type": kind,
+        "exists": False, "readable": False, "valid": False,
+        "last_modified": None, "record_count": None,
+        **({"max_snapshot_age": max_snapshot_age, "max_snapshot_bytes": max_snapshot_bytes,
+            "snapshot_timeout": snapshot_timeout, "max_projection_memory": max_projection_memory,
+            "activate_scout_v2": activate_scout_v2, "activate_scout_lg2": activate_scout_lg2, "current_pointer_status": "NOT_CHECKED"} if name == "scout_snapshot" else {}),
+        "reason": "NOT_CHECKED" if required or path is not None else "DISABLED_UNCONFIGURED",
+    } for name, path, required, kind in specs]
+
+
+def _initialize_worker_inbox(state_dir: Path, sources: list[dict]) -> None:
+    # Initialize only once per state directory, including across restarts. A later
+    # disappearance is a source failure, not permission to silently reset the inbox.
+    paths = worker_paths(state_dir)
+    state = _load_json_or_default(paths["state"], {})
+    if state.get("task_inbox_initialized"):
+        return
+    inbox = Path(next(source["path"] for source in sources if source["name"] == "task_inbox"))
+    inbox.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(inbox, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(descriptor)
+    state["task_inbox_initialized"] = True
+    _atomic_json_write(paths["state"], state)
+
+
+class WorkerCancellation:
+    def __init__(self):
+        self.event = threading.Event()
+        self.memory_limit = None
+
+    def check(self):
+        if self.event.is_set():
+            raise scout_snapshot.Cancelled()
+        if self.memory_limit is not None and scout_projection.rss_bytes() > self.memory_limit:
+            raise scout_snapshot.SnapshotError("PROJECTION_MEMORY_LIMIT", "DEGRADED_INPUT_UNREADABLE")
+
+    def request(self, _signum, _frame):
+        self.event.set()
+
+    @contextmanager
+    def signals(self):
+        previous = {}
         try:
-            record = json.loads(line)
-            task = record.get("task") or record.get("text")
-            if not isinstance(record, dict) or not isinstance(task, str) or not task.strip():
-                raise ValueError("task must be a non-empty string")
-            tasks.append({"task_id": record.get("task_id") or record.get("job_id"), "task": task})
-        except (json.JSONDecodeError, ValueError, AttributeError) as exc:
-            errors.append(f"tasks.jsonl line {number}: {exc}")
-    return tasks, errors
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous[signum] = signal.signal(signum, self.request)
+            yield self
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
+    def compute(self, function, *args):
+        # Pure Python parsing/routing can be CPU-bound. Check cancellation at line
+        # boundaries only during computation; cleanup/persistence are never traced.
+        return self.compute_checked(self.check, function, *args)
+
+    def compute_checked(self, check, function, *args):
+        previous = sys.gettrace()
+        count = 0
+        def trace(frame, event, arg):
+            nonlocal count
+            count += 1
+            if count % 256 == 0:
+                check()
+            return trace
+        self.check()
+        try:
+            sys.settrace(trace)
+            result = function(*args)
+            check()
+            return result
+        finally:
+            sys.settrace(previous)
 
 
-def _worker_profiles(db_path: Path, validation_store: Path, ingest_store: Path, tclk_store: Path) -> tuple[dict[str, AgentProfile], list[str]]:
-    errors = []
+def _worker_snapshot_profiles(conn, check=lambda: None):
+    """Explicit projection adapter; all selected rows affect scoped multiplicity.
+
+    Unsigned rows remain audit/linkage inputs, never positive observations.
+    Source message_hash is raw-text SHA, distinct from Router's composite hash.
+    """
     observations = []
-    interactions = []
-    if db_path.exists():
-        try:
-            adapter = TechnocoreObservationAdapter(db_path)
-            observations = [obs for obs in adapter.observations() if DID_RE.match(obs.identity.did)]
-            interactions = adapter.interactions()
-        except (OSError, sqlite3.Error, ValueError, json.JSONDecodeError) as exc:
-            errors.append(f"observer DB refresh: {exc}")
-    if ingest_store.exists():
-        try:
-            observations.extend(obs for obs in ExportObservationStore(ingest_store).load() if DID_RE.match(obs.identity.did))
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            errors.append(f"Scout export refresh: {exc}")
-    validated = []
-    if validation_store.exists():
-        try:
-            validated = load_validated_evidence(validation_store)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            errors.append(f"validation evidence refresh: {exc}")
-    settlement = []
-    if tclk_store.exists():
-        try:
-            settlement = settlement_evidence_from_tclk(TclkObservationAdapter(tclk_store).observations())
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            errors.append(f"TCLK evidence refresh: {exc}")
-    return ProfileBuilder(observations, interactions, validated, settlement).build_all(), errors
+    query = """WITH templates AS (
+        SELECT template_normalized_hash,COUNT(DISTINCT sender) AS dids
+        FROM messages GROUP BY template_normalized_hash)
+        SELECT m.*,COALESCE(t.dids,1) AS template_dids FROM messages m
+        LEFT JOIN templates t ON t.template_normalized_hash IS m.template_normalized_hash
+        ORDER BY m.room,m.generation,m.seq,substr(m.projection_row_id,5)"""
+    for row in conn.execute(query):
+        check()
+        if not row["signed"] or not DID_RE.match(row["sender"]):
+            continue
+        observations.append(_projection_observation(row))
+    interactions=[]
+    for row in conn.execute("SELECT * FROM interactions ORDER BY projection_row_id"):
+        check(); interactions.append(dict(row))
+    return observations, interactions
 
 
-def _worker_evidence_snapshot(profiles: dict[str, AgentProfile]) -> str:
-    snapshot = []
-    for did in sorted(profiles):
-        profile = profiles[did]
-        snapshot.append({
-            "did": did,
-            "capabilities": [
-                {"id": cap.capability_id, "level": cap.support_level, "confidence": cap.confidence,
-                 "evidence": sorted(cap.supporting_sequence_ids)}
-                for cap in sorted(profile.capabilities, key=lambda item: item.capability_id)
-            ],
-            "validations": sorted(
-                (item.validation_provenance, item.result, item.score)
-                for items in profile.validated_capability_evidence.values() for item in items
-            ),
-            "settlement": sorted(
-                (item.contract_id, item.offer_id, item.level, item.provenance)
-                for item in profile.settlement_evidence
-            ),
-        })
-    return sha256_hex_bytes(canonical_json_bytes(snapshot))
+
+def _projection_observation(row):
+    status = row["verification_status"]
+    if not status:
+        status = (verify_technocore_signature(row["sender"],row["sig"],row["room"],row["nonce"],row["text"])
+                  if row["sig"] and row["nonce"] is not None else "LEGACY_SERVER_VERIFIED_NO_SIGNATURE")
+    msg_hash = observation_message_hash(row["room"],row["generation"],row["seq"],row["sender"],row["nonce"],row["sig"],row["text"])
+    return AgentObservation(
+        identity=AgentIdentity(row["sender"]), room=row["room"], generation=row["generation"],
+        sequence_id=row["seq"], timestamp=row["timestamp"], server_timestamp=row["timestamp"],
+        text=row["text"], normalized_text=row["normalized_text"] or normalize_text(row["text"]),
+        template_hash=row["template_normalized_hash"] or "", is_signed=True,
+        template_dids=row["template_dids"], nonce=row["nonce"],sig=row["sig"],
+        message_hash=msg_hash, verification_status=status,
+        source_export_hash=None, source_export_path=None,
+        evidence_id=row["evidence_id"] or evidence_id_for(row["room"],row["generation"],row["seq"],msg_hash))
+
+
+def _projection_reader(source, state_dir, cancellation):
+    return scout_projection.ProjectionReader(source["path"], worker_paths(state_dir)["dir"] / "v2-copies",
+        cancellation.check, timeout=source["snapshot_timeout"], max_bytes=source["max_snapshot_bytes"],
+        max_memory=source["max_projection_memory"], activate_lg2=source.get("activate_scout_lg2", False))
+
+
+def _worker_json_records(path: Path) -> list[dict]:
+    records = []
+    import projection_contract
+    with path.open('rb') as handle:
+        while line := handle.readline(4*1024**2+1):
+            if len(line)>4*1024**2:
+                raise ValueError("JSONL_RECORD_TOO_LARGE")
+            if line.strip():
+                record = projection_contract.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError("EXPECTED_OBJECT")
+                records.append(record)
+    return records
+
+
+class WorkerInputError(ValueError):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _worker_task_records(records: list[dict]) -> list[dict]:
+    tasks = []
+    for record in records:
+        for aliases in (("task", "text"), ("task_id", "job_id")):
+            values = []
+            for name in aliases:
+                if name in record:
+                    value = record[name]
+                    if not isinstance(value, str) or not value.strip():
+                        raise WorkerInputError("INVALID_TASK_ALIAS")
+                    values.append(value)
+            if len(set(values)) > 1:
+                raise WorkerInputError("CONFLICTING_TASK_ALIAS")
+        task = record.get("task", record.get("text"))
+        if task is None:
+            raise WorkerInputError("MISSING_TASK_TEXT")
+        tasks.append({"task_id": record.get("task_id", record.get("job_id")), "task": task})
+    return tasks
+
+
+def _worker_semantic_record(source_name, record):
+    # These fields are import bookkeeping, never inputs to the corresponding
+    # adapters or scoring rules. Preserve actual source/response timestamps and
+    # every field inside signed/local proof artifacts.
+    ignored = {"processed_at", "imported_at", "ingested_at"}
+    if source_name == "ingest_store":
+        ignored |= {"source_export_path", "source_export_hash"}
+    return {key:value for key,value in record.items() if key not in ignored}
+
+
+def _worker_inputs(sources: list[dict], state_dir: Path, cancellation: WorkerCancellation,
+                   snapshot_reader=None) -> tuple[list[dict], dict[str, AgentProfile], dict]:
+    observations, interactions, validated, settlement, tasks = [], [], [], [], []
+    inputs = {}
+    projected_profiles = None
+    local_proofs = {}
+    for source in sorted(sources, key=lambda source: source["name"] == "scout_snapshot"):
+        cancellation.check()
+        source.update(exists=False, readable=False, valid=False, last_modified=None, record_count=None, detail=None, reason="NOT_CHECKED")
+        if source["name"] == "scout_snapshot":
+            configuration = {"name", "path", "enabled", "required", "type", "max_snapshot_age",
+                "max_snapshot_bytes", "snapshot_timeout", "max_projection_memory", "activate_scout_v2", "activate_scout_lg2",
+                "exists", "readable", "valid", "last_modified", "record_count", "detail", "reason"}
+            for key in tuple(source):
+                if key not in configuration: source.pop(key)
+            source["current_pointer_status"] = "NOT_CHECKED"
+        if not source["enabled"]:
+            source["reason"] = "DISABLED_UNCONFIGURED"
+            continue
+        if source["path"] is None:
+            source["reason"] = "DEGRADED_INPUT_MISSING"
+            continue
+        if source["name"] == "scout_snapshot":
+            reader = snapshot_reader or _projection_reader(source, state_dir, cancellation)
+            reader.local_proofs = local_proofs
+            try:
+                state = _load_json_or_default(worker_paths(state_dir)["state"], {})
+                previous = state.get("last_accepted_projection_v2")
+                legacy = state.get("last_accepted_snapshot")
+                if state.get("scout_contract") == "V2_A1" and not previous:
+                    raise scout_snapshot.SnapshotError("CONTINUITY_CHECKPOINT_MISSING")
+                if legacy and not previous and not source["activate_scout_v2"]:
+                    raise scout_snapshot.SnapshotError("CONTINUITY_V2_ACTIVATION_REQUIRED")
+                import projection_routing
+                loaded, metadata = reader.read(
+                    lambda conn: projection_routing.build(conn, reader, observations, interactions, validated, settlement),
+                    previous=previous, max_age=source["max_snapshot_age"], now=datetime.now(timezone.utc))
+                if legacy and not previous:
+                    if (int(metadata["snapshot_id"]) <= int(legacy["snapshot_id"]) or
+                            scout_snapshot.utc_timestamp(metadata["produced_at"]) < scout_snapshot.utc_timestamp(legacy["produced_at"])):
+                        raise scout_snapshot.SnapshotError("CONTINUITY_V1_GLOBAL_GUARD")
+                source.update(metadata)
+                source.update(exists=True, readable=True, valid=True, reason="OK", detail=None)
+                projected_profiles = loaded
+                source["record_count"] = {"observations": metadata["manifest"]["row_counts"]["messages"], "interactions": metadata["manifest"]["row_counts"]["interactions"]}
+                inputs[source["name"]] = {"routing_input_hash": metadata["routing_input_hash"], "selection_policy": metadata["selection_policy"]}
+            except scout_snapshot.Cancelled:
+                source.update(reader.metadata)
+                source.update(valid=False,readiness="ERROR",reason="ERROR",detail="WORKER_CANCELLED")
+                raise
+            except scout_snapshot.SnapshotError as exc:
+                source.update(reader.metadata)
+                source.update(exists=reader.root_fd is not None, readable=reader.metadata.get("current_pointer_status") == "VALID",
+                              valid=False, reason=exc.reason, detail=exc.code)
+                if source.get("current_pointer_status") == "NOT_CHECKED":
+                    source["current_pointer_status"] = exc.code
+            finally:
+                if snapshot_reader is None:
+                    reader.close()
+            continue
+        path = Path(source["path"])
+        try:
+            info = path.stat()
+            source["exists"] = True
+            source["last_modified"] = datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("NOT_REGULAR_FILE")
+            # Check bits as well as opening: root-like test environments may bypass chmod.
+            if not info.st_mode & 0o444:
+                raise PermissionError()
+            with path.open("rb") as handle:
+                handle.read(1)
+            source["readable"] = True
+            if source["name"] == "bench_proof_store" and info.st_size > 16*1024**2:
+                raise ValueError("PROOF_STORE_TOO_LARGE")
+            records = cancellation.compute(_worker_json_records, path)
+            if source["name"] != "task_inbox":
+                records.sort(key=lambda record:canonical_json_bytes(_worker_semantic_record(source["name"],record)))
+            source["record_count"] = len(records)
+            if source["name"] == "bench_proof_store":
+                import projection_bench
+                local_proofs = cancellation.compute(projection_bench.proofs_from_records, records)
+            elif source["name"] == "task_inbox":
+                tasks = cancellation.compute(_worker_task_records, records)
+            elif source["name"] == "ingest_store":
+                for record in records:
+                    cancellation.check()
+                    for field, value in (("did", record.get("did") or record.get("sender")),
+                                         ("room", record.get("room")), ("text", record.get("text"))):
+                        if not isinstance(value, str):
+                            raise ValueError("INVALID_OBSERVATION_RECORD")
+                    observations.append(observation_from_record(record))
+            elif source["name"] == "validation_store":
+                for record in records:
+                    cancellation.check()
+                    attempt = validation_attempt_from_record(record)
+                    if not all(isinstance(value, str) and value for value in
+                               (attempt.validation_id, attempt.target.did, attempt.target.capability_id)):
+                        raise ValueError("INVALID_VALIDATION_RECORD")
+                    if attempt.outcome and (not isinstance(attempt.outcome.score, (int, float))
+                                            or not math.isfinite(attempt.outcome.score)):
+                        raise ValueError("INVALID_VALIDATION_SCORE")
+                    item = validated_evidence_from_attempt(attempt, path)
+                    if item:
+                        validated.append(item)
+            elif source["name"] == "tclk_store":
+                for record in records:
+                    cancellation.check()
+                    if not isinstance(record.get("transport_did") or record.get("did"), str):
+                        raise ValueError("INVALID_TCLK_RECORD")
+                    if not (record.get("rail") or (record.get("room") and "seq" in record)):
+                        raise ValueError("INVALID_TCLK_RECORD")
+                    rails = record.get("rails_json", record.get("rails"))
+                    if isinstance(rails, str):
+                        rails = json.loads(rails)
+                    if rails is not None and (not isinstance(rails, list) or not all(isinstance(rail, str) for rail in rails)):
+                        raise ValueError("INVALID_TCLK_RAILS")
+                settlement.extend(settlement_evidence_from_tclk(TclkObservationAdapter(path).observations(records)))
+            if source["name"] != "task_inbox":
+                inputs[source["name"]] = [_worker_semantic_record(source["name"],record) for record in records]
+            source["valid"] = True
+            source["reason"] = "OK"
+        except FileNotFoundError:
+            source.update(exists=False, readable=False, reason="DEGRADED_INPUT_MISSING")
+        except (PermissionError, OSError):
+            source.update(readable=False, reason="DEGRADED_INPUT_UNREADABLE")
+        except sqlite3.OperationalError as exc:
+            source["reason"] = ("DEGRADED_INPUT_UNREADABLE" if getattr(exc, "sqlite_errorcode", None)
+                                in {sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_PERM, sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                                else "DEGRADED_INPUT_INVALID")
+            if source["reason"] == "DEGRADED_INPUT_UNREADABLE":
+                source["readable"] = False
+        except WorkerInputError as exc:
+            source.update(reason="DEGRADED_INPUT_INVALID", detail=exc.code)
+        except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            source["reason"] = "DEGRADED_INPUT_INVALID"
+    if any(source["enabled"] and not source["valid"] for source in sources):
+        return tasks, {}, inputs
+    return tasks, projected_profiles if projected_profiles is not None else {}, inputs
+
+
+def _worker_normalize(value):
+    if isinstance(value, dict):
+        return {key: _worker_normalize(item) for key, item in value.items()}
+    if isinstance(value, set):
+        return sorted((_worker_normalize(item) for item in value), key=canonical_json_bytes)
+    if isinstance(value, (list, tuple)):
+        return [_worker_normalize(item) for item in value]
+    return value
+
+
+def _worker_evidence_snapshot(profiles: dict[str, AgentProfile], inputs: dict | None = None) -> str:
+    # All loaded evidence, including logical identities/generations and interactions,
+    # plus every derived profile field used for scoring, trust, risk or settlement.
+    import projection_routing
+    if isinstance(profiles, projection_routing.Profiles):
+        return sha256_hex_bytes(canonical_json_bytes({"inputs": inputs, "derived_policy": projection_routing.VERSION}))
+    stable_profiles = {}
+    for did, profile in profiles.items():
+        record = asdict(profile)
+        record.pop("activity_recency", None)
+        record["trust_evidence"].pop("activity_recency", None)
+        record["trust_evidence"]["components"].pop("activity_recency", None)
+        stable_profiles[did] = record
+    stable_inputs = {k: sorted((_worker_normalize(x) for x in v), key=canonical_json_bytes) if isinstance(v,list) else v
+                     for k,v in (inputs or {}).items()}
+    snapshot = {"profiles": stable_profiles, "inputs": stable_inputs}
+    return sha256_hex_bytes(canonical_json_bytes(_worker_normalize(snapshot)))
 
 
 def _worker_record_append(path: Path, record: dict) -> None:
@@ -5268,33 +5746,68 @@ def _worker_record_append(path: Path, record: dict) -> None:
 
 def run_worker_cycle(
     state_dir: Path,
-    db_path: Path = DEFAULT_DB_PATH,
-    validation_store: Path = DEFAULT_VALIDATION_STORE,
-    ingest_store: Path = DEFAULT_INGEST_STORE,
-    tclk_store: Path = DEFAULT_TCLK_STORE,
+    scout_snapshot_root: Path | None = None,
+    validation_store: Path | None = None,
+    ingest_store: Path | None = None,
+    tclk_store: Path | None = None,
+    task_inbox: Path | None = None,
+    max_snapshot_age: float = scout_snapshot.DEFAULT_MAX_AGE,
+    max_snapshot_bytes: int = scout_projection.MAX_BYTES, snapshot_timeout: float = 30.,
+    max_projection_memory: int = scout_projection.MAX_MEMORY, activate_scout_v2: bool = False,
+    activate_scout_lg2: bool = False,
+    *, sources: list[dict] | None = None, cancellation=None, snapshot_reader=None,
 ) -> dict:
     paths = worker_paths(state_dir)
     started = now_iso()
-    tasks, task_errors = _read_worker_tasks(paths["tasks"])
-    profiles, evidence_errors = _worker_profiles(db_path, validation_store, ingest_store, tclk_store)
-    errors = [*task_errors, *evidence_errors]
-    evidence_snapshot = _worker_evidence_snapshot(profiles)
+    cancellation = cancellation or WorkerCancellation()
+    cancellation.check()
+    if sources is None:
+        sources = worker_sources(state_dir, scout_snapshot_root, validation_store, ingest_store, tclk_store, task_inbox, max_snapshot_age, max_snapshot_bytes, snapshot_timeout, max_projection_memory, activate_scout_v2, activate_scout_lg2=activate_scout_lg2)
+    cancellation.memory_limit = sources[0]["max_projection_memory"]
+    try:
+        _initialize_worker_inbox(state_dir, sources)
+    except OSError:
+        # The source inspection below classifies the unavailable inbox.
+        pass
+    tasks, profiles, inputs = _worker_inputs(sources, state_dir, cancellation, snapshot_reader)
+    errors = [f"{source['name']}:{source['reason']}" for source in sources if source["enabled"] and not source["valid"]]
+    readiness = next((source["reason"] for source in sources if source["enabled"] and not source["valid"]), None)
+    # Prepare bounded status state before routing/decision emission. The full
+    # support index stays in the verified private cache, never a giant JSON map.
+    state_started = time.monotonic()
+    evidence_snapshot = cancellation.compute(_worker_evidence_snapshot, profiles, inputs)
+    current_support = profiles.support() if hasattr(profiles,"support") else {
+        did:{cap.capability_id:cap.support_level for cap in profile.capabilities} for did,profile in profiles.items()}
+    support_scope = profiles.support_scope() if hasattr(profiles,"support_scope") else {"complete":True}
+    verification_count = profiles.verification_count() if hasattr(profiles,"verification_count") else sum(
+        len(items) for profile in profiles.values() for items in profile.validated_capability_evidence.values())
+    cancellation.check()
+    elapsed = time.monotonic()-state_started
+    sources[0].setdefault("stage_seconds",{})["routing_state_construction"] = elapsed
+    if not errors and sources[0].get("total_acquisition_seconds",0)+elapsed > sources[0]["snapshot_timeout"]:
+        sources[0].update(valid=False,readiness="TOO_SLOW",reason="DEGRADED_INPUT_UNREADABLE",detail="SNAPSHOT_READ_TIMEOUT",failed_stage="routing_state_construction")
+        raise scout_snapshot.SnapshotError("SNAPSHOT_READ_TIMEOUT","DEGRADED_INPUT_UNREADABLE")
+    if not errors:
+        sources[0]["readiness_phase"] = "ROUTING_READY"
+        sources[0]["total_acquisition_seconds"] = sources[0].get("total_acquisition_seconds",0)+elapsed
     prior_ids = set()
     if paths["decisions"].exists():
         for line in paths["decisions"].read_text(encoding="utf-8").splitlines():
+            cancellation.check()
             try:
                 prior = json.loads(line)
-                if isinstance(prior, dict) and prior.get("shadow_id"):
-                    prior_ids.add(prior["shadow_id"])
+                if not isinstance(prior, dict) or not isinstance(prior.get("shadow_id"), str):
+                    raise ValueError("INVALID_DECISION_HISTORY")
+                prior_ids.add(prior["shadow_id"])
             except json.JSONDecodeError:
-                errors.append("shadow_decisions.jsonl contains malformed data")
+                raise ValueError("INVALID_DECISION_HISTORY")
     produced = 0
     suppressed = 0
-    for item in tasks:
+    pending_decisions = []
+    for item in tasks if not errors else []:
+        cancellation.check()
         task_text = item["task"]
         task_id = item["task_id"] or task_hash(task_text)
-        routed = Router(profiles).route(task_text, top=5)
-        plan = create_execution_plan(task_text, profiles, ExecutionConstraints())
         shadow_id = sha256_hex_bytes(canonical_json_bytes({
             "task_id": task_id, "task_hash": task_hash(task_text),
             "evidence_snapshot": evidence_snapshot, "policy": WORKER_POLICY_VERSION,
@@ -5302,9 +5815,12 @@ def run_worker_cycle(
         if shadow_id in prior_ids:
             suppressed += 1
             continue
+        routed = cancellation.compute(Router(profiles).route, task_text, 5)
+        plan = cancellation.compute(create_execution_plan, task_text, profiles, ExecutionConstraints())
         selected = [plan.worker["did"]] if plan.worker.get("did") not in {None, "none"} else []
         decision = {
             "schema": "flop-shadow-decision/v1",
+            "projection_scope": inputs.get("scout_snapshot"),
             "shadow_id": shadow_id,
             "task_id": task_id,
             "task_hash": task_hash(task_text),
@@ -5324,56 +5840,202 @@ def run_worker_cycle(
             "network_writes": 0,
             "private_key_accesses": 0,
         }
-        _worker_record_append(paths["decisions"], decision)
+        pending_decisions.append(decision)
         prior_ids.add(shadow_id)
-        produced += 1
+    cancellation.check()
+    if pending_decisions:
+        import tempfile
+        fd, name = tempfile.mkstemp(prefix=".decisions-", dir=paths["dir"])
+        try:
+            with os.fdopen(fd,"wb") as handle:
+                if paths["decisions"].exists():
+                    with paths["decisions"].open("rb") as old:
+                        while True:
+                            cancellation.check(); chunk=old.read(1024**2)
+                            if not chunk: break
+                            handle.write(chunk)
+                for decision in pending_decisions:
+                    cancellation.check()
+                    handle.write(canonical_json_bytes(decision)+b"\n")
+                handle.flush(); os.fsync(handle.fileno())
+            cancellation.check()
+            blocked = {signal.SIGINT, signal.SIGTERM}
+            prior_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+            try:
+                cancellation.check()
+                if signal.sigpending() & blocked:
+                    raise scout_snapshot.Cancelled()
+                os.replace(name, paths["decisions"])
+                produced = len(pending_decisions)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
+        finally:
+            Path(name).unlink(missing_ok=True)
     ended = now_iso()
     cycle = {
         "cycle_id": sha256_hex_bytes(canonical_json_bytes({"started": started, "evidence": evidence_snapshot})),
         "started_at": started,
         "ended_at": ended,
-        "status": "HEALTHY" if not errors else "DEGRADED",
+        "status": readiness or ("READY_ACTIVE" if produced else "READY_IDLE"),
+        "sources": sources,
         "mode": "SHADOW",
+        "assessment_context": {"evidence_snapshot": evidence_snapshot, "assessed_at": ended,
+                               "shadow_policy": WORKER_POLICY_VERSION, "scope": "SCOUT_V2_SELECTED_PROJECTION"},
+        "current_support": current_support,
+        "current_support_scope": support_scope,
         "tasks_observed": len(tasks),
         "shadow_decisions_produced": produced,
         "duplicate_decisions_suppressed": suppressed,
-        "verification_evidence_count": sum(len(items) for profile in profiles.values() for items in profile.validated_capability_evidence.values()),
-        "same_operator_evidence_count": sum(1 for did in profiles if did in {SCOUT_DID, BENCH_DID, ROUTER_DID}),
+        "verification_evidence_count": verification_count,
+        "same_operator_evidence_count": sum(1 for did in {SCOUT_DID, BENCH_DID, ROUTER_DID} if did in profiles),
         "network_writes": 0,
         "private_key_accesses": 0,
         "errors": errors,
     }
-    _worker_record_append(paths["cycles"], cycle)
-    state = _load_json_or_default(paths["state"], {})
-    state.update({
-        "mode": "SHADOW", "router_did": ROUTER_DID, "last_cycle_start": started,
-        "last_cycle_end": ended, "last_success_at": ended if not errors else state.get("last_success_at"),
-        "last_error_at": ended if errors else state.get("last_error_at"),
-        "last_error": "; ".join(errors) if errors else None,
-        "consecutive_failures": int(state.get("consecutive_failures", 0)) + 1 if errors else 0,
-        "current_backoff_seconds": state.get("current_backoff_seconds", 0),
-        "tasks_observed": len(tasks), "shadow_decisions_produced": produced,
-        "duplicate_decisions_suppressed": suppressed,
-        "verification_evidence_count": cycle["verification_evidence_count"],
-        "same_operator_evidence_count": cycle["same_operator_evidence_count"], "network_writes": 0, "private_key_accesses": 0,
-    })
-    _atomic_json_write(paths["state"], state)
+    _persist_worker_cycle(state_dir, cycle)
     return cycle
 
 
-def worker_once(state_dir: Path, **kwargs) -> dict:
-    lock = acquire_worker_lock(state_dir)
+def _persist_worker_cycle(state_dir: Path, cycle: dict) -> None:
+    paths = worker_paths(state_dir)
+    _worker_record_append(paths["cycles"], cycle)
+    state = _load_json_or_default(paths["state"], {})
+    ready = cycle["status"] in {"READY_IDLE", "READY_ACTIVE"}
+    state.update({
+        "mode": "SHADOW", "router_did": ROUTER_DID,
+        "last_cycle_start": cycle["started_at"], "last_cycle_end": cycle["ended_at"],
+        "status": cycle["status"], "readiness": cycle["status"], "sources": cycle["sources"],
+        "last_success_at": cycle["ended_at"] if ready else state.get("last_success_at"),
+        "last_error_at": state.get("last_error_at") if ready else cycle["ended_at"],
+        "last_error": None if ready else "; ".join(cycle["errors"]),
+        "consecutive_failures": 0 if ready else int(state.get("consecutive_failures", 0)) + 1,
+        "current_backoff_seconds": state.get("current_backoff_seconds", 0),
+    })
+    for source in cycle["sources"]:
+        if source["name"] == "scout_snapshot" and source["valid"] and ready:
+            state["last_accepted_projection_v2"] = {key: source[key] for key in
+                ("snapshot_id", "manifest_hash", "database_hash", "database_content_id", "produced_at", "published_at",
+                 "watermarks", "coverage_history", "contract_revision", "manifest", "manifest_canonical_hash", "cache_path")}
+            for key in ("validated_content", "routing_cache", "content_binding", "revision_history", "legacy_generation_audit"):
+                if key in source: state["last_accepted_projection_v2"][key] = source[key]
+            state["scout_contract"] = "V2_A1"
+    state["current_support"] = cycle.get("current_support", {})
+    state["current_support_scope"] = cycle.get("current_support_scope", {"complete":True})
+    state["assessment_context"] = cycle.get("assessment_context")
+    for key in ("tasks_observed", "shadow_decisions_produced", "duplicate_decisions_suppressed",
+                "verification_evidence_count", "same_operator_evidence_count", "network_writes", "private_key_accesses"):
+        state[key] = cycle.get(key, 0)
+    _atomic_json_write(paths["state"], state)
+
+
+def _safe_worker_cycle(state_dir: Path, sources: list[dict], cancellation=None, snapshot_reader=None) -> dict:
+    started = now_iso()
+    owned = snapshot_reader is None and sources[0]["path"] is not None
+    if owned:
+        snapshot_reader = _projection_reader(sources[0], state_dir, cancellation or WorkerCancellation())
     try:
-        return run_worker_cycle(state_dir, **kwargs)
+        return run_worker_cycle(state_dir, sources=sources, cancellation=cancellation, snapshot_reader=snapshot_reader)
+    except Exception as exc:
+        # Never serialize exception messages: parsers may include hostile input or paths.
+        if isinstance(exc, scout_snapshot.Cancelled):
+            for source in sources:
+                if source["enabled"]:
+                    source.update(valid=False,readiness="ERROR",reason="ERROR",detail="WORKER_CANCELLED")
+        cycle = {"cycle_id": sha256_hex_bytes(canonical_json_bytes({"started": started, "status": "ERROR"})),
+                 "started_at": started, "ended_at": now_iso(), "status": "ERROR", "mode": "SHADOW",
+                 "sources": sources, "errors": ["WORKER_CANCELLED" if isinstance(exc, scout_snapshot.Cancelled) else exc.code if isinstance(exc, scout_snapshot.SnapshotError) else "CYCLE_PROCESSING_FAILED"],
+                 "tasks_observed": 0, "shadow_decisions_produced": 0,
+                 "duplicate_decisions_suppressed": 0, "network_writes": 0, "private_key_accesses": 0}
+        try:
+            _persist_worker_cycle(state_dir, cycle)
+        except (ValueError, OSError):
+            # Preserve corrupt/unreadable checkpoint bytes; report without resetting.
+            cycle["errors"].append("WORKER_STATE_UNAVAILABLE")
+        return cycle
     finally:
-        release_worker_lock(lock)
+        if snapshot_reader is not None:
+            try:
+                checkpoint = _load_json_or_default(worker_paths(state_dir)["state"], {}).get("last_accepted_projection_v2", {})
+                accepted = checkpoint.get("cache_path")
+                accepted_routing = checkpoint.get("routing_cache", {}).get("path")
+            except (ValueError,OSError):
+                accepted = accepted_routing = None
+            snapshot_reader.cleanup(accepted, accepted_routing)
+            if owned:
+                snapshot_reader.close()
+
+
+def _worker_log(event: str, **fields) -> None:
+    print(json.dumps({"event": event, "timestamp": now_iso(), **fields}, sort_keys=True), flush=True)
+
+
+class WorkerLog:
+    def __init__(self, state_dir: Path, sources: list[dict]):
+        self.previous = None
+        self.source_reasons = {}
+        self.last_summary = None
+        _worker_log("worker_startup", state_dir=str(state_dir.expanduser().resolve()), mode="SHADOW")
+        _worker_log("source_configuration", sources=sources)
+
+    def cycle(self, cycle: dict) -> None:
+        changed = cycle["status"] != self.previous
+        if changed:
+            _worker_log("readiness_transition", previous=self.previous, status=cycle["status"])
+        for source in cycle["sources"]:
+            previous = self.source_reasons.get(source["name"])
+            reason = source["reason"]
+            if source.get("detail") == "WORKER_CANCELLED":
+                self.source_reasons[source["name"]] = reason
+                continue  # Lifecycle cancellation is logged once in summary/shutdown.
+            if source["enabled"] and reason != previous:
+                if reason != "OK":
+                    _worker_log("source_failure", source=source["name"], reason=reason)
+                elif previous is not None:
+                    _worker_log("source_recovery", source=source["name"], reason=reason)
+            self.source_reasons[source["name"]] = reason
+        now = time.monotonic()
+        if changed or cycle["status"] == "READY_ACTIVE" or self.last_summary is None or now - self.last_summary >= WORKER_IDLE_LOG_SECONDS:
+            _worker_log("cycle_summary", status=cycle["status"], tasks_observed=cycle["tasks_observed"],
+                        shadow_decisions_produced=cycle["shadow_decisions_produced"], errors=cycle["errors"])
+            self.last_summary = now
+        self.previous = cycle["status"]
+
+
+def worker_once(state_dir: Path, **kwargs) -> dict:
+    state_dir = state_dir.expanduser().resolve()
+    sources = worker_sources(state_dir, **kwargs)
+    cancellation = WorkerCancellation()
+    with cancellation.signals():
+        lock = acquire_worker_lock(state_dir)
+        try:
+            logger = WorkerLog(state_dir, sources)
+            cycle = _safe_worker_cycle(state_dir, sources, cancellation)
+            logger.cycle(cycle)
+            if cancellation.event.is_set() and cycle.get("errors") != ["WORKER_CANCELLED"]:
+                # A signal delivered just after the atomic decision commit must
+                # still leave shutdown state; the preceding cycle records any
+                # decisions already committed before cancellation delivery.
+                cycle = _safe_worker_cycle(state_dir, sources, cancellation)
+                logger.cycle(cycle)
+            return cycle
+        finally:
+            release_worker_lock(lock)
+            _worker_log("worker_shutdown", mode="SHADOW")
 
 
 def worker_status(state_dir: Path) -> dict:
     paths = worker_paths(state_dir)
-    state = _load_json_or_default(paths["state"], {})
+    try:
+        state = _load_json_or_default(paths["state"], {})
+    except (ValueError,OSError):
+        state = {"status":"ERROR", "readiness":"ERROR", "last_error":"WORKER_STATE_UNAVAILABLE"}
+    if state.get("status") == "HEALTHY":
+        state["status"] = state["readiness"] = "UNKNOWN_LEGACY"
     state.setdefault("mode", "SHADOW")
     state.setdefault("router_did", ROUTER_DID)
+    state.setdefault("status", "UNKNOWN_LEGACY")
+    state.setdefault("readiness", state["status"])
+    state.setdefault("sources", [])
     state["running"] = paths["lock"].exists() and not _worker_lock_is_stale(paths["lock"])
     state.setdefault("network_writes", 0)
     state.setdefault("private_key_accesses", 0)
@@ -5381,62 +6043,55 @@ def worker_status(state_dir: Path) -> dict:
 
 
 def print_worker_status(state_dir: Path) -> None:
-    status = worker_status(state_dir)
-    print("FLOP Router worker status")
-    print("-------------------------")
-    for key in ("running", "mode", "router_did", "last_cycle_start", "last_cycle_end", "last_success_at", "last_error_at", "last_error", "consecutive_failures", "current_backoff_seconds", "tasks_observed", "shadow_decisions_produced", "duplicate_decisions_suppressed", "verification_evidence_count", "same_operator_evidence_count", "network_writes", "private_key_accesses"):
-        print(f"{key}: {status.get(key)}")
+    print(json.dumps(worker_status(state_dir), indent=2, sort_keys=True))
 
 
 def run_worker_loop(state_dir: Path, poll_interval: float, max_backoff: float, **kwargs) -> int:
-    lock = acquire_worker_lock(state_dir)
-    stop = False
-
-    def request_stop(_signum, _frame):
-        nonlocal stop
-        stop = True
-
-    previous_handlers = {}
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        previous_handlers[signum] = signal.signal(signum, request_stop)
-    try:
-        failures = 0
-        while not stop:
-            try:
-                cycle = run_worker_cycle(state_dir, **kwargs)
-            except Exception as exc:
-                now = now_iso()
-                cycle = {
-                    "started_at": now, "ended_at": now, "status": "DEGRADED",
-                    "errors": [f"worker cycle: {exc}"], "tasks_observed": 0,
-                    "shadow_decisions_produced": 0, "duplicate_decisions_suppressed": 0,
-                    "network_writes": 0, "private_key_accesses": 0,
-                }
-            if cycle["status"] == "HEALTHY":
-                failures = 0
-                delay = max(0.0, poll_interval)
-            else:
-                failures += 1
-                delay = min(max(0.0, max_backoff), max(0.0, poll_interval) * (2 ** min(failures - 1, 20)))
-            state = worker_status(state_dir)
-            state["current_backoff_seconds"] = delay
-            _atomic_json_write(worker_paths(state_dir)["state"], state)
-            if not stop and delay:
-                time.sleep(delay)
-        return 0
-    finally:
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
-        release_worker_lock(lock)
+    if not all(math.isfinite(value) and value > 0 for value in (poll_interval, max_backoff)):
+        raise ValueError("poll interval and max backoff must be finite and positive")
+    state_dir = state_dir.expanduser().resolve()
+    sources = worker_sources(state_dir, **kwargs)
+    cancellation = WorkerCancellation()
+    root = sources[0]["path"]
+    reader = _projection_reader(sources[0], state_dir, cancellation) if root else None
+    with cancellation.signals():
+        lock = acquire_worker_lock(state_dir)
+        try:
+            logger = WorkerLog(state_dir, sources)
+            failures = 0
+            cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader)
+            while True:
+                logger.cycle(cycle)
+                if cycle["status"] in {"READY_IDLE", "READY_ACTIVE"}:
+                    failures = 0
+                    delay = poll_interval
+                else:
+                    failures += 1
+                    delay = min(max_backoff, poll_interval * (2 ** min(failures - 1, 20)))
+                state = worker_status(state_dir)
+                state["current_backoff_seconds"] = delay
+                _atomic_json_write(worker_paths(state_dir)["state"], state)
+                if cancellation.event.wait(delay) or cancellation.event.is_set():
+                    if cycle.get("errors") != ["WORKER_CANCELLED"]:
+                        cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader)
+                        logger.cycle(cycle)
+                    break
+                cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader)
+            return 0
+        finally:
+            if reader is not None:
+                reader.close()
+            release_worker_lock(lock)
+            _worker_log("worker_shutdown", mode="SHADOW")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only Agent Router Prototype")
-    parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Read-only observer SQLite snapshot")
-    parser.add_argument("--validation-store", default=str(DEFAULT_VALIDATION_STORE), help="Local ignored validation JSONL store")
-    parser.add_argument("--ingest-store", default=str(DEFAULT_INGEST_STORE), help="Local ignored Technocore export ingestion JSONL store")
-    parser.add_argument("--tclk-store", default=str(DEFAULT_TCLK_STORE), help="Local normalized Scout TCLK observation JSONL store")
-    parser.add_argument("--verification-evidence-store", default=str(DEFAULT_VERIFICATION_EVIDENCE_STORE), help="Local ignored verification evidence JSONL store")
+    parser.add_argument("--db", default=None, help="Read-only observer SQLite snapshot")
+    parser.add_argument("--validation-store", default=None, help="Local ignored validation JSONL store")
+    parser.add_argument("--ingest-store", default=None, help="Local ignored Technocore export ingestion JSONL store")
+    parser.add_argument("--tclk-store", default=None, help="Local normalized Scout TCLK observation JSONL store")
+    parser.add_argument("--verification-evidence-store", default=None, help="Local ignored verification evidence JSONL store")
     parser.add_argument("--state-dir", default=str(DEFAULT_ROUTER_STATE_DIR), help="Router private state directory")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("inspect-data")
@@ -5589,41 +6244,55 @@ def main() -> None:
     worker_once_parser.add_argument("--shadow", action="store_true")
     worker_status_parser = worker_sub.add_parser("status")
     worker_status_parser.add_argument("--state-dir", type=Path, default=argparse.SUPPRESS)
+    for worker_parser in (worker_run, worker_once_parser):
+        worker_parser.add_argument("--scout-db", help=argparse.SUPPRESS)
+        worker_parser.add_argument("--scout-snapshot-root", type=Path, help="Required immutable Scout publication directory; no default")
+        worker_parser.add_argument("--max-snapshot-age", type=float, default=scout_snapshot.DEFAULT_MAX_AGE, help="Maximum snapshot age in seconds (default 3600)")
+        worker_parser.add_argument("--max-snapshot-bytes", type=int, default=scout_projection.MAX_BYTES)
+        worker_parser.add_argument("--snapshot-timeout", type=float, default=30.0)
+        worker_parser.add_argument("--max-projection-memory", type=int, default=scout_projection.MAX_MEMORY)
+        worker_parser.add_argument("--activate-scout-lg2", action="store_true", help="Explicit A1/LG1 checkpoint migration to LG2; preserve history and rebuild caches")
+        worker_parser.add_argument("--activate-scout-v2", action="store_true", help="Explicit migration from retained V1 checkpoint")
+        worker_parser.add_argument("--validation-store", dest="worker_validation_store", type=Path, help="Validation attempts JSONL; omitted means disabled")
+        worker_parser.add_argument("--ingest-store", dest="worker_ingest_store", type=Path, help="Normalized Scout exports JSONL; omitted means disabled")
+        worker_parser.add_argument("--tclk-store", dest="worker_tclk_store", type=Path, help="Normalized TCLK JSONL; omitted means disabled")
+        worker_parser.add_argument("--bench-proof-store", type=Path, help="Explicit Router-local router-bench-proof/v1 JSONL originals; disabled when omitted")
+        worker_parser.add_argument("--task-inbox", type=Path, help="Router-owned task JSONL; default <state-dir>/worker/tasks.jsonl")
     args = parser.parse_args()
-    db_path = Path(args.db)
-    validation_store = Path(args.validation_store)
-    ingest_store = Path(args.ingest_store)
-    tclk_store = Path(args.tclk_store)
-    verification_evidence_store = Path(args.verification_evidence_store)
+    db_path = Path(args.db or DEFAULT_DB_PATH)
+    validation_store = Path(args.validation_store or DEFAULT_VALIDATION_STORE)
+    ingest_store = Path(args.ingest_store or DEFAULT_INGEST_STORE)
+    tclk_store = Path(args.tclk_store or DEFAULT_TCLK_STORE)
+    verification_evidence_store = Path(args.verification_evidence_store or DEFAULT_VERIFICATION_EVIDENCE_STORE)
     state_dir = Path(args.state_dir)
 
     if args.command == "worker":
+        if any(getattr(args, name) is not None for name in ("db", "validation_store", "ingest_store", "tclk_store", "verification_evidence_store")):
+            parser.error("worker inputs must follow worker run/once: use --scout-snapshot-root, --validation-store, --ingest-store, --tclk-store. --verification-evidence-store is a lifecycle audit store, not a worker profile input.")
         if args.worker_command == "status":
             print_worker_status(state_dir)
             return
         if not args.shadow:
-            raise SystemExit("worker commands require --shadow.")
+            parser.error("worker commands require --shadow")
+        if args.scout_db is not None:
+            parser.error("--scout-db is unsafe/deprecated for workers; use --scout-snapshot-root with a producer publication")
+        if not math.isfinite(args.max_snapshot_age) or args.max_snapshot_age <= 0:
+            parser.error("max snapshot age must be finite and positive")
+        inputs = dict(scout_snapshot_root=args.scout_snapshot_root, max_snapshot_age=args.max_snapshot_age,
+                      validation_store=args.worker_validation_store,
+                      ingest_store=args.worker_ingest_store, tclk_store=args.worker_tclk_store,
+                      task_inbox=args.task_inbox, max_snapshot_bytes=args.max_snapshot_bytes,
+                      snapshot_timeout=args.snapshot_timeout, max_projection_memory=args.max_projection_memory,
+                      activate_scout_v2=args.activate_scout_v2, activate_scout_lg2=args.activate_scout_lg2, bench_proof_store=args.bench_proof_store)
         if args.worker_command == "once":
-            cycle = worker_once(
-                state_dir,
-                db_path=db_path,
-                validation_store=validation_store,
-                ingest_store=ingest_store,
-                tclk_store=tclk_store,
-            )
-            print(json.dumps(cycle, indent=2, sort_keys=True))
+            cycle = worker_once(state_dir, **inputs)
+            print(json.dumps(cycle, sort_keys=True))
+            if cycle["status"] not in {"READY_IDLE", "READY_ACTIVE"}:
+                raise SystemExit(1)
             return
-        if args.poll_interval <= 0 or args.max_backoff <= 0:
-            raise SystemExit("poll interval and max backoff must be positive.")
-        run_worker_loop(
-            state_dir,
-            args.poll_interval,
-            args.max_backoff,
-            db_path=db_path,
-            validation_store=validation_store,
-            ingest_store=ingest_store,
-            tclk_store=tclk_store,
-        )
+        if not all(math.isfinite(value) and value > 0 for value in (args.poll_interval, args.max_backoff)):
+            parser.error("poll interval and max backoff must be finite and positive")
+        run_worker_loop(state_dir, args.poll_interval, args.max_backoff, **inputs)
         return
 
     if args.command == "inspect-data":

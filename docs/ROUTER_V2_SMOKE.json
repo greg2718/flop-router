@@ -1,0 +1,60 @@
+[
+  {
+    "case": "missing",
+    "command": [
+      "/Users/greg/Dev/flop-router/.venv/bin/python",
+      "/Users/greg/Dev/flop-router/router.py",
+      "worker",
+      "once",
+      "--state-dir",
+      "/private/tmp/router-v2-smoke-fb85rb1p/missing",
+      "--shadow"
+    ],
+    "cwd": "/",
+    "exit_code": 1,
+    "status": "DEGRADED_INPUT_MISSING",
+    "decisions": 0,
+    "network_writes": 0,
+    "private_key_accesses": 0,
+    "status_command": [
+      "/Users/greg/Dev/flop-router/.venv/bin/python",
+      "/Users/greg/Dev/flop-router/router.py",
+      "worker",
+      "status",
+      "--state-dir",
+      "/private/tmp/router-v2-smoke-fb85rb1p/missing"
+    ],
+    "status_exit_code": 0,
+    "running": false
+  },
+  {
+    "case": "ready",
+    "command": [
+      "/Users/greg/Dev/flop-router/.venv/bin/python",
+      "/Users/greg/Dev/flop-router/router.py",
+      "worker",
+      "once",
+      "--state-dir",
+      "/private/tmp/router-v2-smoke-fb85rb1p/ready",
+      "--shadow",
+      "--scout-snapshot-root",
+      "/private/tmp/router-v2-smoke-fb85rb1p/publication"
+    ],
+    "cwd": "/",
+    "exit_code": 0,
+    "status": "READY_IDLE",
+    "decisions": 0,
+    "network_writes": 0,
+    "private_key_accesses": 0,
+    "status_command": [
+      "/Users/greg/Dev/flop-router/.venv/bin/python",
+      "/Users/greg/Dev/flop-router/router.py",
+      "worker",
+      "status",
+      "--state-dir",
+      "/private/tmp/router-v2-smoke-fb85rb1p/ready"
+    ],
+    "status_exit_code": 0,
+    "running": false
+  }
+]

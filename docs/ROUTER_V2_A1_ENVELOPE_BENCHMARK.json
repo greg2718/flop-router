@@ -1,0 +1,2047 @@
+{
+  "measured_on": "2026-09-08",
+  "notes": [
+    "Synthetic fixtures only; scale counts messages, not all relational rows.",
+    "Nested timings overlap; RSS values are process high-water marks.",
+    "Diagnostic 350k budget is 180 seconds, not a changed worker default.",
+    "100k was measured before the final phase-label/fingerprint-timing adjustment; bounded state assembly is included. Implementation hashes identify each run."
+  ],
+  "runs": {
+    "100k": {
+      "age_seconds": 0,
+      "cache_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-_2vavydi/cache/fe463ce1101650a129fd85be261d71aa825f1da130ab2905583854c202a7a281.sqlite",
+      "changed_content": {
+        "age_seconds": 0,
+        "cache_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-_2vavydi/cache/38c48ded4e4449bcae8abe9a81acea0012a528952881ec86439711b3f11e5ab5.sqlite",
+        "contract_revision": "A1",
+        "controlled_bench_workflows": 0,
+        "coverage_history": [
+          {
+            "generation": "0",
+            "max_ever_projected_seq": 99999,
+            "room": "synthetic-room",
+            "witness_record_sha256": "ad4b655fa8bb8a0c75e154de0ea7aabc20e093beae3e00135e7f06b2411c310b",
+            "witness_source_locator": "benchmark-99999"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_ever_projected_seq": 100000,
+            "room": "synthetic-room",
+            "witness_record_sha256": "694712ad012f6a124646944f5aa20893a281abd342e5c37fed7aff16f50ef225",
+            "witness_source_locator": "benchmark-100000"
+          }
+        ],
+        "current_pointer_status": "VALID",
+        "database_content_id": "2",
+        "database_hash": "38c48ded4e4449bcae8abe9a81acea0012a528952881ec86439711b3f11e5ab5",
+        "database_schema_version": "scout-router-projection/v2",
+        "deadline_seconds": 30.0,
+        "last_modified": "2026-09-08T20:49:28.669468+00:00",
+        "manifest": {
+          "content_created_at": "2026-09-08T12:00:02.000000Z",
+          "contract_revision": "A1",
+          "coverage_history": [
+            {
+              "generation": "0",
+              "max_ever_projected_seq": 99999,
+              "room": "synthetic-room",
+              "witness_record_sha256": "ad4b655fa8bb8a0c75e154de0ea7aabc20e093beae3e00135e7f06b2411c310b",
+              "witness_source_locator": "benchmark-99999"
+            },
+            {
+              "generation": "UNKNOWN_LEGACY",
+              "max_ever_projected_seq": 100000,
+              "room": "synthetic-room",
+              "witness_record_sha256": "694712ad012f6a124646944f5aa20893a281abd342e5c37fed7aff16f50ef225",
+              "witness_source_locator": "benchmark-100000"
+            }
+          ],
+          "database": "router-projection-v2-2-38c48ded4e4449bcae8abe9a81acea0012a528952881ec86439711b3f11e5ab5.sqlite",
+          "database_content_id": "2",
+          "database_schema_version": "scout-router-projection/v2",
+          "next_expiry_at": "2026-10-08T12:00:00.000000Z",
+          "produced_at": "2026-09-08T12:00:02.000000Z",
+          "publication_kind": "CONTENT",
+          "row_counts": {
+            "coverage_history": 2,
+            "durable_qualifications": 50000,
+            "interactions": 1,
+            "messages": 100000,
+            "qualification_events": 5000,
+            "selection_membership": 100001,
+            "source_provenance": 100001,
+            "watermarks": 2
+          },
+          "schema": "flop-scout-router-snapshot/v2",
+          "selection_evaluated_at": "2026-09-08T12:00:02.000000Z",
+          "selection_policy": {
+            "classifier_version": "router-evidence-classes/2",
+            "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+            "parameters": {
+              "capability_signal_seconds": 7776000,
+              "closed_tclk_seconds": 7776000,
+              "closed_work_seconds": 7776000,
+              "context_seconds": 2592000
+            },
+            "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+            "qualification_policy_version": "router-durable-qualification/v1",
+            "schema": "flop-router-projection-selection/v1",
+            "version": "router-evidence-horizons/2"
+          },
+          "selection_policy_sha256": "219730642f738fb6c94b21b4a722aa7e078a60ae7cf5c1e0e115dfe5e9c53c5f",
+          "sha256": "38c48ded4e4449bcae8abe9a81acea0012a528952881ec86439711b3f11e5ab5",
+          "size_bytes": 385626112,
+          "snapshot_id": "3",
+          "source_checkpoint": {
+            "committed_event_id": "100001",
+            "epoch": "benchmark-epoch",
+            "source_id": "scout-observer"
+          },
+          "watermarks": [
+            {
+              "generation": "0",
+              "max_seq": 99999,
+              "min_seq": 1,
+              "record_count": 95000,
+              "room": "synthetic-room"
+            },
+            {
+              "generation": "UNKNOWN_LEGACY",
+              "max_seq": 100000,
+              "min_seq": 20,
+              "record_count": 5000,
+              "room": "synthetic-room"
+            }
+          ]
+        },
+        "manifest_canonical_hash": "142fd1b2b6197300777be5c1c25c4a2b9b4a9499a50b2468b2c52eea69e8d892",
+        "manifest_hash": "142fd1b2b6197300777be5c1c25c4a2b9b4a9499a50b2468b2c52eea69e8d892",
+        "max_memory_bytes": 536870912,
+        "max_snapshot_bytes": 4294967296,
+        "peak_rss_bytes": 82935808,
+        "preferred": true,
+        "produced_at": "2026-09-08T12:00:02.000000Z",
+        "profile_query_plan": [
+          [
+            3,
+            0,
+            0,
+            "MATERIALIZE templates"
+          ],
+          [
+            10,
+            3,
+            216,
+            "SCAN messages"
+          ],
+          [
+            12,
+            3,
+            0,
+            "USE TEMP B-TREE FOR GROUP BY"
+          ],
+          [
+            52,
+            3,
+            0,
+            "USE TEMP B-TREE FOR count(DISTINCT)"
+          ],
+          [
+            58,
+            0,
+            0,
+            "MATERIALIZE duplicates"
+          ],
+          [
+            65,
+            58,
+            216,
+            "SCAN messages"
+          ],
+          [
+            69,
+            58,
+            0,
+            "USE TEMP B-TREE FOR GROUP BY"
+          ],
+          [
+            124,
+            0,
+            224,
+            "SCAN m USING INDEX messages_coverage"
+          ],
+          [
+            140,
+            0,
+            47,
+            "SEARCH t USING AUTOMATIC COVERING INDEX (template_normalized_hash=?) LEFT-JOIN"
+          ],
+          [
+            150,
+            0,
+            0,
+            "BLOOM FILTER ON d (sender=? AND room=? AND generation=? AND template=?)"
+          ],
+          [
+            163,
+            0,
+            47,
+            "SEARCH d USING AUTOMATIC COVERING INDEX (sender=? AND room=? AND generation=? AND template=?) LEFT-JOIN"
+          ],
+          [
+            220,
+            0,
+            0,
+            "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
+          ]
+        ],
+        "publication_id": "3",
+        "published_at": "2026-09-08T12:00:02.000000Z",
+        "qualification_history": {
+          "audit_only": true,
+          "events": 5000,
+          "invalidated": 5000,
+          "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+          "qualifications": 50000
+        },
+        "readiness": "READY",
+        "readiness_phase": "INDEX_READY",
+        "reused_database": false,
+        "root_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-_2vavydi/publication",
+        "routing_cache": {
+          "path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-_2vavydi/cache/38c48ded4e4449bcae8abe9a81acea0012a528952881ec86439711b3f11e5ab5.3771a804d0cc558ffd372df2be0b7a02186b56aa84ec8aa4dce578afabbe288a.routing.sqlite",
+          "proof_hash": "26b8291f8aef22bcedc3d0c4e3e4fd30189086edab4322d873c6baa3d5741050",
+          "sha256": "3771a804d0cc558ffd372df2be0b7a02186b56aa84ec8aa4dce578afabbe288a",
+          "size": 247439360,
+          "version": "router-projection-summaries/1"
+        },
+        "routing_input_hash": "e55c8e49e9aa19b32ad4a5aef88a97dcb1dc6a7912f398e923d1a4cf2703b75b",
+        "rows_read": {
+          "durable_qualifications": 50000,
+          "interactions": 1,
+          "messages": 100000,
+          "qualification_events": 5000,
+          "selection_membership": 100001,
+          "source_provenance": 100001
+        },
+        "selection_policy": {
+          "classifier_version": "router-evidence-classes/2",
+          "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+          "parameters": {
+            "capability_signal_seconds": 7776000,
+            "closed_tclk_seconds": 7776000,
+            "closed_work_seconds": 7776000,
+            "context_seconds": 2592000
+          },
+          "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+          "qualification_policy_version": "router-durable-qualification/v1",
+          "schema": "flop-router-projection-selection/v1",
+          "version": "router-evidence-horizons/2"
+        },
+        "size_bytes": 385626112,
+        "size_readiness": "QUALIFIED",
+        "snapshot_id": "3",
+        "stage_peak_rss_bytes": {
+          "capability_support_derivation": 82935808,
+          "continuity_comparison": 82264064,
+          "controlled_bench_linkage": 82935808,
+          "duplicate_processing": 82264064,
+          "evidence_materialization": 82935808,
+          "integrity_validation": 82264064,
+          "interaction_loading": 82935808,
+          "interactions_loading": 82264064,
+          "manifest_read": 82264064,
+          "membership_loading": 82264064,
+          "messages_loading": 82264064,
+          "pointer_read": 82264064,
+          "prior_copy_verification": 82264064,
+          "profile_construction": 82935808,
+          "qualification_event_loading": 82264064,
+          "qualification_loading": 82264064,
+          "qualification_records_loading": 82264064,
+          "routing_state_construction": 82935808,
+          "schema_validation": 82264064,
+          "source_provenance_loading": 82264064,
+          "sqlite_open": 82264064,
+          "watermark_validation": 82264064,
+          "workflow_reconstruction": 82264064
+        },
+        "stage_peak_rss_delta_bytes": {
+          "capability_support_derivation": 671744,
+          "continuity_comparison": 0,
+          "controlled_bench_linkage": 0,
+          "duplicate_processing": 0,
+          "evidence_materialization": 671744,
+          "integrity_validation": 0,
+          "interaction_loading": 0,
+          "manifest_read": 0,
+          "pointer_read": 0,
+          "prior_copy_verification": 0,
+          "profile_construction": 0,
+          "qualification_loading": 0,
+          "routing_state_construction": 0,
+          "schema_validation": 0,
+          "sqlite_open": 0,
+          "watermark_validation": 0,
+          "workflow_reconstruction": 0
+        },
+        "stage_seconds": {
+          "capability_support_derivation": 13.816100750002079,
+          "continuity_comparison": 0.5978358749998733,
+          "controlled_bench_linkage": 5.2583025535568595e-05,
+          "database_copy": 0.17758150328882039,
+          "duplicate_processing": 0.31388916700962,
+          "evidence_materialization": 15.763019000005443,
+          "integrity_validation": 0.3422611670102924,
+          "interaction_loading": 0.0007153339975047857,
+          "interactions_loading": 0.0001015419838950038,
+          "manifest_read": 0.000125583988847211,
+          "membership_loading": 0.8850970839848742,
+          "messages_loading": 1.634805542009417,
+          "pointer_read": 0.00016970798606052995,
+          "prior_copy_verification": 0.15318579200538807,
+          "profile_construction": 1.8133400840160903,
+          "qualification_event_loading": 0.5259683330077678,
+          "qualification_loading": 4.906858625006862,
+          "qualification_records_loading": 4.278137541026808,
+          "routing_state_construction": 0.025119999976595864,
+          "schema_validation": 4.896947125002043,
+          "sha256": 0.128469663701253,
+          "source_provenance_loading": 2.110812332975911,
+          "sqlite_open": 0.0005395830085035414,
+          "watermark_validation": 0.014918584027327597,
+          "workflow_reconstruction": 0.0061630420095752925
+        },
+        "status": "PASS",
+        "total_acquisition_seconds": 26.990124832984293,
+        "validated_content": {
+          "checksum": "f251078ec8491bfc2360901894e43108c515ed42891f9cb3febb24d526d4a79b",
+          "database_hash": "38c48ded4e4449bcae8abe9a81acea0012a528952881ec86439711b3f11e5ab5",
+          "qualification_history": {
+            "audit_only": true,
+            "events": 5000,
+            "invalidated": 5000,
+            "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+            "qualifications": 50000
+          },
+          "routing_input_hash": "e55c8e49e9aa19b32ad4a5aef88a97dcb1dc6a7912f398e923d1a4cf2703b75b",
+          "version": "router-v2-a1-validator/2"
+        },
+        "watermarks": [
+          {
+            "generation": "0",
+            "max_seq": 99999,
+            "min_seq": 1,
+            "record_count": 95000,
+            "room": "synthetic-room"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_seq": 100000,
+            "min_seq": 20,
+            "record_count": 5000,
+            "room": "synthetic-room"
+          }
+        ],
+        "workflow_closures_validated": true
+      },
+      "contract_revision": "A1",
+      "controlled_bench_workflows": 0,
+      "coverage_history": [
+        {
+          "generation": "0",
+          "max_ever_projected_seq": 99999,
+          "room": "synthetic-room",
+          "witness_record_sha256": "ad4b655fa8bb8a0c75e154de0ea7aabc20e093beae3e00135e7f06b2411c310b",
+          "witness_source_locator": "benchmark-99999"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_ever_projected_seq": 100000,
+          "room": "synthetic-room",
+          "witness_record_sha256": "694712ad012f6a124646944f5aa20893a281abd342e5c37fed7aff16f50ef225",
+          "witness_source_locator": "benchmark-100000"
+        }
+      ],
+      "current_pointer_status": "VALID",
+      "database_content_id": "1",
+      "database_hash": "fe463ce1101650a129fd85be261d71aa825f1da130ab2905583854c202a7a281",
+      "database_schema_version": "scout-router-projection/v2",
+      "deadline_seconds": 30.0,
+      "implementation_sha256": "48c8c9eeb82e136758098e3a94e6395fc58ec415d49c975655a927a31598b04a",
+      "last_modified": "2026-09-08T20:48:59.600671+00:00",
+      "manifest": {
+        "content_created_at": "2026-09-08T12:00:00.000000Z",
+        "contract_revision": "A1",
+        "coverage_history": [
+          {
+            "generation": "0",
+            "max_ever_projected_seq": 99999,
+            "room": "synthetic-room",
+            "witness_record_sha256": "ad4b655fa8bb8a0c75e154de0ea7aabc20e093beae3e00135e7f06b2411c310b",
+            "witness_source_locator": "benchmark-99999"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_ever_projected_seq": 100000,
+            "room": "synthetic-room",
+            "witness_record_sha256": "694712ad012f6a124646944f5aa20893a281abd342e5c37fed7aff16f50ef225",
+            "witness_source_locator": "benchmark-100000"
+          }
+        ],
+        "database": "router-projection-v2-1-fe463ce1101650a129fd85be261d71aa825f1da130ab2905583854c202a7a281.sqlite",
+        "database_content_id": "1",
+        "database_schema_version": "scout-router-projection/v2",
+        "next_expiry_at": "2026-10-08T12:00:00.000000Z",
+        "produced_at": "2026-09-08T12:00:00.000000Z",
+        "publication_kind": "CONTENT",
+        "row_counts": {
+          "coverage_history": 2,
+          "durable_qualifications": 50000,
+          "interactions": 0,
+          "messages": 100000,
+          "qualification_events": 5000,
+          "selection_membership": 100000,
+          "source_provenance": 100000,
+          "watermarks": 2
+        },
+        "schema": "flop-scout-router-snapshot/v2",
+        "selection_evaluated_at": "2026-09-08T12:00:00.000000Z",
+        "selection_policy": {
+          "classifier_version": "router-evidence-classes/2",
+          "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+          "parameters": {
+            "capability_signal_seconds": 7776000,
+            "closed_tclk_seconds": 7776000,
+            "closed_work_seconds": 7776000,
+            "context_seconds": 2592000
+          },
+          "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+          "qualification_policy_version": "router-durable-qualification/v1",
+          "schema": "flop-router-projection-selection/v1",
+          "version": "router-evidence-horizons/2"
+        },
+        "selection_policy_sha256": "219730642f738fb6c94b21b4a722aa7e078a60ae7cf5c1e0e115dfe5e9c53c5f",
+        "sha256": "fe463ce1101650a129fd85be261d71aa825f1da130ab2905583854c202a7a281",
+        "size_bytes": 385626112,
+        "snapshot_id": "1",
+        "source_checkpoint": {
+          "committed_event_id": "100000",
+          "epoch": "benchmark-epoch",
+          "source_id": "scout-observer"
+        },
+        "watermarks": [
+          {
+            "generation": "0",
+            "max_seq": 99999,
+            "min_seq": 1,
+            "record_count": 95000,
+            "room": "synthetic-room"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_seq": 100000,
+            "min_seq": 20,
+            "record_count": 5000,
+            "room": "synthetic-room"
+          }
+        ]
+      },
+      "manifest_canonical_hash": "d5b180a82c8fdd70e55f9441500e1693d8047dfa87931f06c1f5bb48e0482945",
+      "manifest_hash": "d5b180a82c8fdd70e55f9441500e1693d8047dfa87931f06c1f5bb48e0482945",
+      "max_memory_bytes": 536870912,
+      "max_snapshot_bytes": 4294967296,
+      "peak_rss_bytes": 82264064,
+      "preferred": true,
+      "produced_at": "2026-09-08T12:00:00.000000Z",
+      "profile_query_plan": [
+        [
+          3,
+          0,
+          0,
+          "MATERIALIZE templates"
+        ],
+        [
+          10,
+          3,
+          216,
+          "SCAN messages"
+        ],
+        [
+          12,
+          3,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          52,
+          3,
+          0,
+          "USE TEMP B-TREE FOR count(DISTINCT)"
+        ],
+        [
+          58,
+          0,
+          0,
+          "MATERIALIZE duplicates"
+        ],
+        [
+          65,
+          58,
+          216,
+          "SCAN messages"
+        ],
+        [
+          69,
+          58,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          124,
+          0,
+          224,
+          "SCAN m USING INDEX messages_coverage"
+        ],
+        [
+          140,
+          0,
+          47,
+          "SEARCH t USING AUTOMATIC COVERING INDEX (template_normalized_hash=?) LEFT-JOIN"
+        ],
+        [
+          150,
+          0,
+          0,
+          "BLOOM FILTER ON d (sender=? AND room=? AND generation=? AND template=?)"
+        ],
+        [
+          163,
+          0,
+          47,
+          "SEARCH d USING AUTOMATIC COVERING INDEX (sender=? AND room=? AND generation=? AND template=?) LEFT-JOIN"
+        ],
+        [
+          220,
+          0,
+          0,
+          "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
+        ]
+      ],
+      "profiles": true,
+      "publication_id": "1",
+      "published_at": "2026-09-08T12:00:00.000000Z",
+      "qualification_history": {
+        "audit_only": true,
+        "events": 5000,
+        "invalidated": 5000,
+        "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+        "qualifications": 50000
+      },
+      "readiness": "READY",
+      "readiness_phase": "INDEX_READY",
+      "reused_database": false,
+      "root_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-_2vavydi/publication",
+      "routing_cache": {
+        "path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-_2vavydi/cache/fe463ce1101650a129fd85be261d71aa825f1da130ab2905583854c202a7a281.3771a804d0cc558ffd372df2be0b7a02186b56aa84ec8aa4dce578afabbe288a.routing.sqlite",
+        "proof_hash": "26b8291f8aef22bcedc3d0c4e3e4fd30189086edab4322d873c6baa3d5741050",
+        "sha256": "3771a804d0cc558ffd372df2be0b7a02186b56aa84ec8aa4dce578afabbe288a",
+        "size": 247439360,
+        "version": "router-projection-summaries/1"
+      },
+      "routing_input_hash": "a1c7cf106bead5971f6eeb670dc513481ddcec991a14596b226e386aa328920d",
+      "rows_read": {
+        "durable_qualifications": 50000,
+        "interactions": 0,
+        "messages": 100000,
+        "qualification_events": 5000,
+        "selection_membership": 100000,
+        "source_provenance": 100000
+      },
+      "scale": "100k",
+      "selection_policy": {
+        "classifier_version": "router-evidence-classes/2",
+        "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+        "parameters": {
+          "capability_signal_seconds": 7776000,
+          "closed_tclk_seconds": 7776000,
+          "closed_work_seconds": 7776000,
+          "context_seconds": 2592000
+        },
+        "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+        "qualification_policy_version": "router-durable-qualification/v1",
+        "schema": "flop-router-projection-selection/v1",
+        "version": "router-evidence-horizons/2"
+      },
+      "size_bytes": 385626112,
+      "size_readiness": "QUALIFIED",
+      "snapshot_id": "1",
+      "stage_peak_rss_bytes": {
+        "capability_support_derivation": 82264064,
+        "controlled_bench_linkage": 82264064,
+        "duplicate_processing": 78135296,
+        "evidence_materialization": 82264064,
+        "integrity_validation": 39026688,
+        "interaction_loading": 82264064,
+        "interactions_loading": 39567360,
+        "manifest_read": 36012032,
+        "membership_loading": 39649280,
+        "messages_loading": 39567360,
+        "pointer_read": 35995648,
+        "profile_construction": 82264064,
+        "qualification_event_loading": 43728896,
+        "qualification_loading": 45580288,
+        "qualification_records_loading": 39649280,
+        "routing_state_construction": 82264064,
+        "schema_validation": 39649280,
+        "source_provenance_loading": 39649280,
+        "sqlite_open": 36012032,
+        "watermark_validation": 39649280,
+        "workflow_reconstruction": 45580288
+      },
+      "stage_peak_rss_delta_bytes": {
+        "capability_support_derivation": 36503552,
+        "controlled_bench_linkage": 0,
+        "duplicate_processing": 32374784,
+        "evidence_materialization": 36683776,
+        "integrity_validation": 3014656,
+        "interaction_loading": 0,
+        "manifest_read": 16384,
+        "pointer_read": 49152,
+        "profile_construction": 0,
+        "qualification_loading": 5931008,
+        "routing_state_construction": 0,
+        "schema_validation": 622592,
+        "sqlite_open": 0,
+        "watermark_validation": 0,
+        "workflow_reconstruction": 0
+      },
+      "stage_seconds": {
+        "capability_support_derivation": 13.98781391599914,
+        "controlled_bench_linkage": 0.0005617919960059226,
+        "database_copy": 0.5018168329261243,
+        "duplicate_processing": 0.32725525001296774,
+        "evidence_materialization": 16.277670790994307,
+        "integrity_validation": 1.104401249991497,
+        "interaction_loading": 0.0009203339868690819,
+        "interactions_loading": 5.241698818281293e-05,
+        "manifest_read": 0.0001838750031311065,
+        "membership_loading": 0.861306082981173,
+        "messages_loading": 1.6082060409826227,
+        "pointer_read": 0.0003180829808115959,
+        "profile_construction": 2.1489293329941574,
+        "qualification_event_loading": 0.5209171669848729,
+        "qualification_loading": 4.875721374992281,
+        "qualification_records_loading": 4.2596702500013635,
+        "routing_state_construction": 0.029628542019054294,
+        "schema_validation": 4.858924833999481,
+        "sha256": 0.12678112607682124,
+        "source_provenance_loading": 2.157705082994653,
+        "sqlite_open": 0.00022429099772125483,
+        "watermark_validation": 0.014481125021120533,
+        "workflow_reconstruction": 0.0059610839816741645
+      },
+      "status": "PASS",
+      "subset_rows": null,
+      "total_acquisition_seconds": 27.7690192090231,
+      "validated_content": {
+        "checksum": "c472b1df2ace10be45a842aca976f3ac79e577f3f8598308d4cf3c0d03a30591",
+        "database_hash": "fe463ce1101650a129fd85be261d71aa825f1da130ab2905583854c202a7a281",
+        "qualification_history": {
+          "audit_only": true,
+          "events": 5000,
+          "invalidated": 5000,
+          "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+          "qualifications": 50000
+        },
+        "routing_input_hash": "a1c7cf106bead5971f6eeb670dc513481ddcec991a14596b226e386aa328920d",
+        "version": "router-v2-a1-validator/2"
+      },
+      "warm": {
+        "first_heartbeat": {
+          "peak_rss_bytes": 82264064,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.13432008301606402,
+            "manifest_read": 0.00013416699948720634,
+            "pointer_read": 5.075000808574259e-05,
+            "prior_copy_verification": 0.1646141659875866,
+            "routing_state_construction": 0.028044499980751425,
+            "sqlite_open": 0.0001835830044001341
+          },
+          "total_acquisition_seconds": 0.2996738340007141,
+          "validation_cache_reused": true
+        },
+        "restart_heartbeat": {
+          "peak_rss_bytes": 82264064,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.12267149999388494,
+            "manifest_read": 0.00014541699783876538,
+            "pointer_read": 0.00020716601284220815,
+            "prior_copy_verification": 0.15495825000107288,
+            "routing_state_construction": 0.024206041998695582,
+            "sqlite_open": 0.00016850000247359276
+          },
+          "total_acquisition_seconds": 0.2784873750060797,
+          "validation_cache_reused": true
+        },
+        "steady_heartbeat": {
+          "peak_rss_bytes": 82264064,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.024335958005394787,
+            "manifest_read": 0.00014329099212773144,
+            "pointer_read": 6.229101563803852e-05,
+            "prior_copy_verification": 3.8416008464992046e-05,
+            "routing_state_construction": 0.024284167011501268,
+            "sqlite_open": 0.00010429101530462503
+          },
+          "total_acquisition_seconds": 0.024883541016606614,
+          "validation_cache_reused": true
+        }
+      },
+      "watermarks": [
+        {
+          "generation": "0",
+          "max_seq": 99999,
+          "min_seq": 1,
+          "record_count": 95000,
+          "room": "synthetic-room"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_seq": 100000,
+          "min_seq": 20,
+          "record_count": 5000,
+          "room": "synthetic-room"
+        }
+      ],
+      "workflow_closures_validated": true
+    },
+    "10k": {
+      "age_seconds": 0,
+      "cache_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-dg_27i1b/cache/955838cb31dc08f8feaedecc46f298b87b73b2c3338514869d987bcbd67ebe4c.sqlite",
+      "changed_content": null,
+      "contract_revision": "A1",
+      "controlled_bench_workflows": 0,
+      "coverage_history": [
+        {
+          "generation": "0",
+          "max_ever_projected_seq": 9999,
+          "room": "synthetic-room",
+          "witness_record_sha256": "c0fdbd62589c1ec044dfd08eb06a2d62ce1a46c35d7af806ab476fee0c55d762",
+          "witness_source_locator": "benchmark-9999"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_ever_projected_seq": 10000,
+          "room": "synthetic-room",
+          "witness_record_sha256": "83cb669b06a4b9da67cc081e9357845646821a3430f49e50283f34ae6e601e97",
+          "witness_source_locator": "benchmark-10000"
+        }
+      ],
+      "current_pointer_status": "VALID",
+      "database_content_id": "1",
+      "database_hash": "955838cb31dc08f8feaedecc46f298b87b73b2c3338514869d987bcbd67ebe4c",
+      "database_schema_version": "scout-router-projection/v2",
+      "deadline_seconds": 30.0,
+      "implementation_sha256": "43925bb46bcf3b8ea83b356c45152ba401884401c21f1f7966fc5a081eacb893",
+      "last_modified": "2026-09-08T20:50:05.702220+00:00",
+      "manifest": {
+        "content_created_at": "2026-09-08T12:00:00.000000Z",
+        "contract_revision": "A1",
+        "coverage_history": [
+          {
+            "generation": "0",
+            "max_ever_projected_seq": 9999,
+            "room": "synthetic-room",
+            "witness_record_sha256": "c0fdbd62589c1ec044dfd08eb06a2d62ce1a46c35d7af806ab476fee0c55d762",
+            "witness_source_locator": "benchmark-9999"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_ever_projected_seq": 10000,
+            "room": "synthetic-room",
+            "witness_record_sha256": "83cb669b06a4b9da67cc081e9357845646821a3430f49e50283f34ae6e601e97",
+            "witness_source_locator": "benchmark-10000"
+          }
+        ],
+        "database": "router-projection-v2-1-955838cb31dc08f8feaedecc46f298b87b73b2c3338514869d987bcbd67ebe4c.sqlite",
+        "database_content_id": "1",
+        "database_schema_version": "scout-router-projection/v2",
+        "next_expiry_at": "2026-10-08T12:00:00.000000Z",
+        "produced_at": "2026-09-08T12:00:00.000000Z",
+        "publication_kind": "CONTENT",
+        "row_counts": {
+          "coverage_history": 2,
+          "durable_qualifications": 5000,
+          "interactions": 0,
+          "messages": 10000,
+          "qualification_events": 500,
+          "selection_membership": 10000,
+          "source_provenance": 10000,
+          "watermarks": 2
+        },
+        "schema": "flop-scout-router-snapshot/v2",
+        "selection_evaluated_at": "2026-09-08T12:00:00.000000Z",
+        "selection_policy": {
+          "classifier_version": "router-evidence-classes/2",
+          "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+          "parameters": {
+            "capability_signal_seconds": 7776000,
+            "closed_tclk_seconds": 7776000,
+            "closed_work_seconds": 7776000,
+            "context_seconds": 2592000
+          },
+          "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+          "qualification_policy_version": "router-durable-qualification/v1",
+          "schema": "flop-router-projection-selection/v1",
+          "version": "router-evidence-horizons/2"
+        },
+        "selection_policy_sha256": "219730642f738fb6c94b21b4a722aa7e078a60ae7cf5c1e0e115dfe5e9c53c5f",
+        "sha256": "955838cb31dc08f8feaedecc46f298b87b73b2c3338514869d987bcbd67ebe4c",
+        "size_bytes": 38305792,
+        "snapshot_id": "1",
+        "source_checkpoint": {
+          "committed_event_id": "100000",
+          "epoch": "benchmark-epoch",
+          "source_id": "scout-observer"
+        },
+        "watermarks": [
+          {
+            "generation": "0",
+            "max_seq": 9999,
+            "min_seq": 1,
+            "record_count": 9500,
+            "room": "synthetic-room"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_seq": 10000,
+            "min_seq": 20,
+            "record_count": 500,
+            "room": "synthetic-room"
+          }
+        ]
+      },
+      "manifest_canonical_hash": "002553921cc65caf2989b88ea62bfa6063b2aa3c03e815883d08b261ef1371cb",
+      "manifest_hash": "002553921cc65caf2989b88ea62bfa6063b2aa3c03e815883d08b261ef1371cb",
+      "max_memory_bytes": 536870912,
+      "max_snapshot_bytes": 4294967296,
+      "peak_rss_bytes": 68714496,
+      "preferred": true,
+      "produced_at": "2026-09-08T12:00:00.000000Z",
+      "profile_query_plan": [
+        [
+          3,
+          0,
+          0,
+          "MATERIALIZE templates"
+        ],
+        [
+          10,
+          3,
+          216,
+          "SCAN messages"
+        ],
+        [
+          12,
+          3,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          52,
+          3,
+          0,
+          "USE TEMP B-TREE FOR count(DISTINCT)"
+        ],
+        [
+          58,
+          0,
+          0,
+          "MATERIALIZE duplicates"
+        ],
+        [
+          65,
+          58,
+          216,
+          "SCAN messages"
+        ],
+        [
+          69,
+          58,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          124,
+          0,
+          224,
+          "SCAN m USING INDEX messages_coverage"
+        ],
+        [
+          140,
+          0,
+          47,
+          "SEARCH t USING AUTOMATIC COVERING INDEX (template_normalized_hash=?) LEFT-JOIN"
+        ],
+        [
+          150,
+          0,
+          0,
+          "BLOOM FILTER ON d (sender=? AND room=? AND generation=? AND template=?)"
+        ],
+        [
+          163,
+          0,
+          47,
+          "SEARCH d USING AUTOMATIC COVERING INDEX (sender=? AND room=? AND generation=? AND template=?) LEFT-JOIN"
+        ],
+        [
+          220,
+          0,
+          0,
+          "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
+        ]
+      ],
+      "profiles": true,
+      "publication_id": "1",
+      "published_at": "2026-09-08T12:00:00.000000Z",
+      "qualification_history": {
+        "audit_only": true,
+        "events": 500,
+        "invalidated": 500,
+        "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+        "qualifications": 5000
+      },
+      "readiness": "READY",
+      "readiness_phase": "ROUTING_READY",
+      "reused_database": false,
+      "root_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-dg_27i1b/publication",
+      "routing_cache": {
+        "path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-dg_27i1b/cache/955838cb31dc08f8feaedecc46f298b87b73b2c3338514869d987bcbd67ebe4c.408d16c504282f20e5ee5012c585271f0ac9d72cbdb05d9dc793c6928264d720.routing.sqlite",
+        "proof_hash": "26b8291f8aef22bcedc3d0c4e3e4fd30189086edab4322d873c6baa3d5741050",
+        "sha256": "408d16c504282f20e5ee5012c585271f0ac9d72cbdb05d9dc793c6928264d720",
+        "size": 24674304,
+        "version": "router-projection-summaries/1"
+      },
+      "routing_input_hash": "94244795f91e5abc005c3fd220fb687d15ae65ef8be4615978a479e21b002b25",
+      "rows_read": {
+        "durable_qualifications": 5000,
+        "interactions": 0,
+        "messages": 10000,
+        "qualification_events": 500,
+        "selection_membership": 10000,
+        "source_provenance": 10000
+      },
+      "scale": "100k",
+      "selection_policy": {
+        "classifier_version": "router-evidence-classes/2",
+        "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+        "parameters": {
+          "capability_signal_seconds": 7776000,
+          "closed_tclk_seconds": 7776000,
+          "closed_work_seconds": 7776000,
+          "context_seconds": 2592000
+        },
+        "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+        "qualification_policy_version": "router-durable-qualification/v1",
+        "schema": "flop-router-projection-selection/v1",
+        "version": "router-evidence-horizons/2"
+      },
+      "size_bytes": 38305792,
+      "size_readiness": "QUALIFIED",
+      "snapshot_id": "1",
+      "stage_peak_rss_bytes": {
+        "capability_support_derivation": 67715072,
+        "controlled_bench_linkage": 67780608,
+        "duplicate_processing": 59506688,
+        "evidence_materialization": 68714496,
+        "integrity_validation": 48971776,
+        "interaction_loading": 67731456,
+        "interactions_loading": 49102848,
+        "manifest_read": 41730048,
+        "membership_loading": 49168384,
+        "messages_loading": 49086464,
+        "pointer_read": 41697280,
+        "profile_construction": 67780608,
+        "qualification_event_loading": 52707328,
+        "qualification_loading": 52772864,
+        "qualification_records_loading": 50659328,
+        "routing_state_construction": 68714496,
+        "schema_validation": 49168384,
+        "source_provenance_loading": 49168384,
+        "sqlite_open": 41730048,
+        "watermark_validation": 49168384,
+        "workflow_reconstruction": 52772864
+      },
+      "stage_peak_rss_delta_bytes": {
+        "capability_support_derivation": 14876672,
+        "controlled_bench_linkage": 0,
+        "duplicate_processing": 6668288,
+        "evidence_materialization": 15941632,
+        "integrity_validation": 7241728,
+        "interaction_loading": 16384,
+        "manifest_read": 32768,
+        "pointer_read": 32768,
+        "profile_construction": 49152,
+        "qualification_loading": 3604480,
+        "routing_state_construction": 933888,
+        "schema_validation": 196608,
+        "sqlite_open": 0,
+        "watermark_validation": 0,
+        "workflow_reconstruction": 0
+      },
+      "stage_seconds": {
+        "capability_support_derivation": 1.2939104159886483,
+        "controlled_bench_linkage": 0.0005442080146167427,
+        "database_copy": 0.008396043063839898,
+        "duplicate_processing": 0.023784583987435326,
+        "evidence_materialization": 1.4803089579800144,
+        "integrity_validation": 0.029551709012594074,
+        "interaction_loading": 0.00012658399646170437,
+        "interactions_loading": 5.949998740106821e-05,
+        "manifest_read": 0.0002444580022711307,
+        "membership_loading": 0.08443204200011678,
+        "messages_loading": 0.15903074998641387,
+        "pointer_read": 0.0002734169829636812,
+        "profile_construction": 0.1469499169907067,
+        "qualification_event_loading": 0.039087874989490956,
+        "qualification_loading": 0.42068916599964723,
+        "qualification_records_loading": 0.3750110830005724,
+        "routing_state_construction": 0.022999459004495293,
+        "schema_validation": 0.47152125000138767,
+        "sha256": 0.012736331933410838,
+        "source_provenance_loading": 0.20759016700321808,
+        "sqlite_open": 0.00017954199574887753,
+        "watermark_validation": 0.0014570410130545497,
+        "workflow_reconstruction": 0.0004997089854441583
+      },
+      "status": "PASS",
+      "subset_rows": 10000,
+      "total_acquisition_seconds": 2.427290791994892,
+      "validated_content": {
+        "checksum": "bf5490ff74c30bb1dd521a2b738ad7c8f9c92956e8224b36d69d5bd082d7ea4b",
+        "database_hash": "955838cb31dc08f8feaedecc46f298b87b73b2c3338514869d987bcbd67ebe4c",
+        "qualification_history": {
+          "audit_only": true,
+          "events": 500,
+          "invalidated": 500,
+          "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+          "qualifications": 5000
+        },
+        "routing_input_hash": "94244795f91e5abc005c3fd220fb687d15ae65ef8be4615978a479e21b002b25",
+        "version": "router-v2-a1-validator/2"
+      },
+      "warm": {
+        "first_heartbeat": {
+          "peak_rss_bytes": 68730880,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.03226787500898354,
+            "manifest_read": 0.00013841697364114225,
+            "pointer_read": 5.6125019909814e-05,
+            "prior_copy_verification": 0.014983124972786754,
+            "routing_state_construction": 0.022270332992775366,
+            "sqlite_open": 0.00016554098692722619
+          },
+          "total_acquisition_seconds": 0.04791379199014045,
+          "validation_cache_reused": true
+        },
+        "restart_heartbeat": {
+          "peak_rss_bytes": 68730880,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.03281137498561293,
+            "manifest_read": 0.00014349998673424125,
+            "pointer_read": 0.00019912500283680856,
+            "prior_copy_verification": 0.015294916986022145,
+            "routing_state_construction": 0.023087874986231327,
+            "sqlite_open": 0.00015704199904575944
+          },
+          "total_acquisition_seconds": 0.048891459009610116,
+          "validation_cache_reused": true
+        },
+        "steady_heartbeat": {
+          "peak_rss_bytes": 68730880,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.02307341599953361,
+            "manifest_read": 0.00014404201647266746,
+            "pointer_read": 5.883298581466079e-05,
+            "prior_copy_verification": 3.816699609160423e-05,
+            "routing_state_construction": 0.02302100000088103,
+            "sqlite_open": 0.00011100000119768083
+          },
+          "total_acquisition_seconds": 0.02362162500503473,
+          "validation_cache_reused": true
+        }
+      },
+      "watermarks": [
+        {
+          "generation": "0",
+          "max_seq": 9999,
+          "min_seq": 1,
+          "record_count": 9500,
+          "room": "synthetic-room"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_seq": 10000,
+          "min_seq": 20,
+          "record_count": 500,
+          "room": "synthetic-room"
+        }
+      ],
+      "workflow_closures_validated": true
+    },
+    "1k": {
+      "age_seconds": 0,
+      "cache_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-5sy31k_b/cache/78bc9ef952ba81d61d60d846219d626c1ee52d9da448d0f0f2cc082e96c576b2.sqlite",
+      "changed_content": null,
+      "contract_revision": "A1",
+      "controlled_bench_workflows": 0,
+      "coverage_history": [
+        {
+          "generation": "0",
+          "max_ever_projected_seq": 999,
+          "room": "synthetic-room",
+          "witness_record_sha256": "d8c4363b0ca213f3c989614356312154fda5e538c7c0d5e19c80aa3e0a913523",
+          "witness_source_locator": "benchmark-999"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_ever_projected_seq": 1000,
+          "room": "synthetic-room",
+          "witness_record_sha256": "02c8d8e4f481e9c69282814991b7dbdeab0a0dc01fbb14220608913310db77f8",
+          "witness_source_locator": "benchmark-1000"
+        }
+      ],
+      "current_pointer_status": "VALID",
+      "database_content_id": "1",
+      "database_hash": "78bc9ef952ba81d61d60d846219d626c1ee52d9da448d0f0f2cc082e96c576b2",
+      "database_schema_version": "scout-router-projection/v2",
+      "deadline_seconds": 30.0,
+      "implementation_sha256": "43925bb46bcf3b8ea83b356c45152ba401884401c21f1f7966fc5a081eacb893",
+      "last_modified": "2026-09-08T20:49:45.983754+00:00",
+      "manifest": {
+        "content_created_at": "2026-09-08T12:00:00.000000Z",
+        "contract_revision": "A1",
+        "coverage_history": [
+          {
+            "generation": "0",
+            "max_ever_projected_seq": 999,
+            "room": "synthetic-room",
+            "witness_record_sha256": "d8c4363b0ca213f3c989614356312154fda5e538c7c0d5e19c80aa3e0a913523",
+            "witness_source_locator": "benchmark-999"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_ever_projected_seq": 1000,
+            "room": "synthetic-room",
+            "witness_record_sha256": "02c8d8e4f481e9c69282814991b7dbdeab0a0dc01fbb14220608913310db77f8",
+            "witness_source_locator": "benchmark-1000"
+          }
+        ],
+        "database": "router-projection-v2-1-78bc9ef952ba81d61d60d846219d626c1ee52d9da448d0f0f2cc082e96c576b2.sqlite",
+        "database_content_id": "1",
+        "database_schema_version": "scout-router-projection/v2",
+        "next_expiry_at": "2026-10-08T12:00:00.000000Z",
+        "produced_at": "2026-09-08T12:00:00.000000Z",
+        "publication_kind": "CONTENT",
+        "row_counts": {
+          "coverage_history": 2,
+          "durable_qualifications": 500,
+          "interactions": 0,
+          "messages": 1000,
+          "qualification_events": 50,
+          "selection_membership": 1000,
+          "source_provenance": 1000,
+          "watermarks": 2
+        },
+        "schema": "flop-scout-router-snapshot/v2",
+        "selection_evaluated_at": "2026-09-08T12:00:00.000000Z",
+        "selection_policy": {
+          "classifier_version": "router-evidence-classes/2",
+          "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+          "parameters": {
+            "capability_signal_seconds": 7776000,
+            "closed_tclk_seconds": 7776000,
+            "closed_work_seconds": 7776000,
+            "context_seconds": 2592000
+          },
+          "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+          "qualification_policy_version": "router-durable-qualification/v1",
+          "schema": "flop-router-projection-selection/v1",
+          "version": "router-evidence-horizons/2"
+        },
+        "selection_policy_sha256": "219730642f738fb6c94b21b4a722aa7e078a60ae7cf5c1e0e115dfe5e9c53c5f",
+        "sha256": "78bc9ef952ba81d61d60d846219d626c1ee52d9da448d0f0f2cc082e96c576b2",
+        "size_bytes": 3878912,
+        "snapshot_id": "1",
+        "source_checkpoint": {
+          "committed_event_id": "100000",
+          "epoch": "benchmark-epoch",
+          "source_id": "scout-observer"
+        },
+        "watermarks": [
+          {
+            "generation": "0",
+            "max_seq": 999,
+            "min_seq": 1,
+            "record_count": 950,
+            "room": "synthetic-room"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_seq": 1000,
+            "min_seq": 20,
+            "record_count": 50,
+            "room": "synthetic-room"
+          }
+        ]
+      },
+      "manifest_canonical_hash": "5a773671c9a626ca832517e544687f129028b36be60fa948b6519cf6c16aa4ca",
+      "manifest_hash": "5a773671c9a626ca832517e544687f129028b36be60fa948b6519cf6c16aa4ca",
+      "max_memory_bytes": 536870912,
+      "max_snapshot_bytes": 4294967296,
+      "peak_rss_bytes": 49053696,
+      "preferred": true,
+      "produced_at": "2026-09-08T12:00:00.000000Z",
+      "profile_query_plan": [
+        [
+          3,
+          0,
+          0,
+          "MATERIALIZE templates"
+        ],
+        [
+          10,
+          3,
+          216,
+          "SCAN messages"
+        ],
+        [
+          12,
+          3,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          52,
+          3,
+          0,
+          "USE TEMP B-TREE FOR count(DISTINCT)"
+        ],
+        [
+          58,
+          0,
+          0,
+          "MATERIALIZE duplicates"
+        ],
+        [
+          65,
+          58,
+          216,
+          "SCAN messages"
+        ],
+        [
+          69,
+          58,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          124,
+          0,
+          224,
+          "SCAN m USING INDEX messages_coverage"
+        ],
+        [
+          140,
+          0,
+          47,
+          "SEARCH t USING AUTOMATIC COVERING INDEX (template_normalized_hash=?) LEFT-JOIN"
+        ],
+        [
+          150,
+          0,
+          0,
+          "BLOOM FILTER ON d (sender=? AND room=? AND generation=? AND template=?)"
+        ],
+        [
+          163,
+          0,
+          47,
+          "SEARCH d USING AUTOMATIC COVERING INDEX (sender=? AND room=? AND generation=? AND template=?) LEFT-JOIN"
+        ],
+        [
+          220,
+          0,
+          0,
+          "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
+        ]
+      ],
+      "profiles": true,
+      "publication_id": "1",
+      "published_at": "2026-09-08T12:00:00.000000Z",
+      "qualification_history": {
+        "audit_only": true,
+        "events": 50,
+        "invalidated": 50,
+        "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+        "qualifications": 500
+      },
+      "readiness": "READY",
+      "readiness_phase": "ROUTING_READY",
+      "reused_database": false,
+      "root_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-5sy31k_b/publication",
+      "routing_cache": {
+        "path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-5sy31k_b/cache/78bc9ef952ba81d61d60d846219d626c1ee52d9da448d0f0f2cc082e96c576b2.89c0bc7cdbac399327788932928c425f993968fc8894cc3466d52b4e74832083.routing.sqlite",
+        "proof_hash": "26b8291f8aef22bcedc3d0c4e3e4fd30189086edab4322d873c6baa3d5741050",
+        "sha256": "89c0bc7cdbac399327788932928c425f993968fc8894cc3466d52b4e74832083",
+        "size": 2551808,
+        "version": "router-projection-summaries/1"
+      },
+      "routing_input_hash": "d074f7445b9439fdc5b102d35e5db2876df104ef17347b0f09ea08de7323006f",
+      "rows_read": {
+        "durable_qualifications": 500,
+        "interactions": 0,
+        "messages": 1000,
+        "qualification_events": 50,
+        "selection_membership": 1000,
+        "source_provenance": 1000
+      },
+      "scale": "100k",
+      "selection_policy": {
+        "classifier_version": "router-evidence-classes/2",
+        "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+        "parameters": {
+          "capability_signal_seconds": 7776000,
+          "closed_tclk_seconds": 7776000,
+          "closed_work_seconds": 7776000,
+          "context_seconds": 2592000
+        },
+        "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+        "qualification_policy_version": "router-durable-qualification/v1",
+        "schema": "flop-router-projection-selection/v1",
+        "version": "router-evidence-horizons/2"
+      },
+      "size_bytes": 3878912,
+      "size_readiness": "QUALIFIED",
+      "snapshot_id": "1",
+      "stage_peak_rss_bytes": {
+        "capability_support_derivation": 47333376,
+        "controlled_bench_linkage": 48971776,
+        "duplicate_processing": 45170688,
+        "evidence_materialization": 49053696,
+        "integrity_validation": 43139072,
+        "interaction_loading": 47333376,
+        "interactions_loading": 43286528,
+        "manifest_read": 40648704,
+        "membership_loading": 43433984,
+        "messages_loading": 43286528,
+        "pointer_read": 40632320,
+        "profile_construction": 48971776,
+        "qualification_event_loading": 44482560,
+        "qualification_loading": 44564480,
+        "qualification_records_loading": 43581440,
+        "routing_state_construction": 49053696,
+        "schema_validation": 43433984,
+        "source_provenance_loading": 43433984,
+        "sqlite_open": 40648704,
+        "watermark_validation": 43466752,
+        "workflow_reconstruction": 44564480
+      },
+      "stage_peak_rss_delta_bytes": {
+        "capability_support_derivation": 2736128,
+        "controlled_bench_linkage": 0,
+        "duplicate_processing": 573440,
+        "evidence_materialization": 4489216,
+        "integrity_validation": 2490368,
+        "interaction_loading": 0,
+        "manifest_read": 16384,
+        "pointer_read": 32768,
+        "profile_construction": 1638400,
+        "qualification_loading": 1097728,
+        "routing_state_construction": 81920,
+        "schema_validation": 294912,
+        "sqlite_open": 0,
+        "watermark_validation": 32768,
+        "workflow_reconstruction": 0
+      },
+      "stage_seconds": {
+        "capability_support_derivation": 0.13367645800462924,
+        "controlled_bench_linkage": 0.00030045901075936854,
+        "database_copy": 0.0012870839855168015,
+        "duplicate_processing": 0.0018976249848492444,
+        "evidence_materialization": 0.16062199999578297,
+        "integrity_validation": 0.0021155839785933495,
+        "interaction_loading": 0.00010191701585426927,
+        "interactions_loading": 4.558300133794546e-05,
+        "manifest_read": 0.00032137500238604844,
+        "membership_loading": 0.009136124979704618,
+        "messages_loading": 0.016313166997861117,
+        "pointer_read": 0.0003028330102097243,
+        "profile_construction": 0.01795254199532792,
+        "qualification_event_loading": 0.005070375016657636,
+        "qualification_loading": 0.04263945799903013,
+        "qualification_records_loading": 0.03591391700319946,
+        "routing_state_construction": 0.0025055000151041895,
+        "schema_validation": 0.04827791699790396,
+        "sha256": 0.0012964580091647804,
+        "source_provenance_loading": 0.020839834003709257,
+        "sqlite_open": 0.00014820901560597122,
+        "watermark_validation": 0.00038412498543038964,
+        "workflow_reconstruction": 6.583301001228392e-05
+      },
+      "status": "PASS",
+      "subset_rows": 1000,
+      "total_acquisition_seconds": 0.25855224998667836,
+      "validated_content": {
+        "checksum": "d14dfc9a95bbfd9861ae2b359c5c2a6058035ba58314a1b22f03c8d9420ddc1c",
+        "database_hash": "78bc9ef952ba81d61d60d846219d626c1ee52d9da448d0f0f2cc082e96c576b2",
+        "qualification_history": {
+          "audit_only": true,
+          "events": 50,
+          "invalidated": 50,
+          "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+          "qualifications": 500
+        },
+        "routing_input_hash": "d074f7445b9439fdc5b102d35e5db2876df104ef17347b0f09ea08de7323006f",
+        "version": "router-v2-a1-validator/2"
+      },
+      "warm": {
+        "first_heartbeat": {
+          "peak_rss_bytes": 49086464,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.004374624986667186,
+            "manifest_read": 0.00012404198059812188,
+            "pointer_read": 4.33750101365149e-05,
+            "prior_copy_verification": 0.0015674169990234077,
+            "routing_state_construction": 0.0033468329929746687,
+            "sqlite_open": 0.00010820801253430545
+          },
+          "total_acquisition_seconds": 0.006389374990249053,
+          "validation_cache_reused": true
+        },
+        "restart_heartbeat": {
+          "peak_rss_bytes": 49102848,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.0034172919986303896,
+            "manifest_read": 0.000113667018013075,
+            "pointer_read": 0.00016299998969770968,
+            "prior_copy_verification": 0.0015696249902248383,
+            "routing_state_construction": 0.0023909169831313193,
+            "sqlite_open": 9.287500870414078e-05
+          },
+          "total_acquisition_seconds": 0.005494249984622002,
+          "validation_cache_reused": true
+        },
+        "steady_heartbeat": {
+          "peak_rss_bytes": 49102848,
+          "readiness": "READY",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.002453958004480228,
+            "manifest_read": 0.00014275001012720168,
+            "pointer_read": 5.6042015785351396e-05,
+            "prior_copy_verification": 3.9125006878748536e-05,
+            "routing_state_construction": 0.0024048339982982725,
+            "sqlite_open": 0.0001016249880194664
+          },
+          "total_acquisition_seconds": 0.0029535830253735185,
+          "validation_cache_reused": true
+        }
+      },
+      "watermarks": [
+        {
+          "generation": "0",
+          "max_seq": 999,
+          "min_seq": 1,
+          "record_count": 950,
+          "room": "synthetic-room"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_seq": 1000,
+          "min_seq": 20,
+          "record_count": 50,
+          "room": "synthetic-room"
+        }
+      ],
+      "workflow_closures_validated": true
+    },
+    "1m": {
+      "age_seconds": 0,
+      "changed_content": null,
+      "contract_revision": "A1",
+      "coverage_history": [
+        {
+          "generation": "0",
+          "max_ever_projected_seq": 999999,
+          "room": "synthetic-room",
+          "witness_record_sha256": "49075e73c7e22ae22c906f7daa9c1398d391dd43f1acdc32e0a7b13d71cc4308",
+          "witness_source_locator": "benchmark-999999"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_ever_projected_seq": 1000000,
+          "room": "synthetic-room",
+          "witness_record_sha256": "3dfac6c7dd853f43cf9c6cb594ecdea3dfa5b651f583195538f408c5c2415acf",
+          "witness_source_locator": "benchmark-1000000"
+        }
+      ],
+      "current_pointer_status": "VALID",
+      "database_content_id": "1",
+      "database_hash": "cc41b6204fbeb7700640fe9a47c3db8d7d64549c21edf15d3a79248c0bdf7d19",
+      "database_schema_version": "scout-router-projection/v2",
+      "deadline_seconds": 30.0,
+      "failed_stage": "integrity_validation",
+      "implementation_sha256": "43925bb46bcf3b8ea83b356c45152ba401884401c21f1f7966fc5a081eacb893",
+      "last_modified": "2026-09-08T20:52:38.702482+00:00",
+      "manifest": {
+        "content_created_at": "2026-09-08T12:00:00.000000Z",
+        "contract_revision": "A1",
+        "coverage_history": [
+          {
+            "generation": "0",
+            "max_ever_projected_seq": 999999,
+            "room": "synthetic-room",
+            "witness_record_sha256": "49075e73c7e22ae22c906f7daa9c1398d391dd43f1acdc32e0a7b13d71cc4308",
+            "witness_source_locator": "benchmark-999999"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_ever_projected_seq": 1000000,
+            "room": "synthetic-room",
+            "witness_record_sha256": "3dfac6c7dd853f43cf9c6cb594ecdea3dfa5b651f583195538f408c5c2415acf",
+            "witness_source_locator": "benchmark-1000000"
+          }
+        ],
+        "database": "router-projection-v2-1-cc41b6204fbeb7700640fe9a47c3db8d7d64549c21edf15d3a79248c0bdf7d19.sqlite",
+        "database_content_id": "1",
+        "database_schema_version": "scout-router-projection/v2",
+        "next_expiry_at": "2026-10-08T12:00:00.000000Z",
+        "produced_at": "2026-09-08T12:00:00.000000Z",
+        "publication_kind": "CONTENT",
+        "row_counts": {
+          "coverage_history": 2,
+          "durable_qualifications": 500000,
+          "interactions": 0,
+          "messages": 1000000,
+          "qualification_events": 50000,
+          "selection_membership": 1000000,
+          "source_provenance": 1000000,
+          "watermarks": 2
+        },
+        "schema": "flop-scout-router-snapshot/v2",
+        "selection_evaluated_at": "2026-09-08T12:00:00.000000Z",
+        "selection_policy": {
+          "classifier_version": "router-evidence-classes/2",
+          "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+          "parameters": {
+            "capability_signal_seconds": 7776000,
+            "closed_tclk_seconds": 7776000,
+            "closed_work_seconds": 7776000,
+            "context_seconds": 2592000
+          },
+          "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+          "qualification_policy_version": "router-durable-qualification/v1",
+          "schema": "flop-router-projection-selection/v1",
+          "version": "router-evidence-horizons/2"
+        },
+        "selection_policy_sha256": "219730642f738fb6c94b21b4a722aa7e078a60ae7cf5c1e0e115dfe5e9c53c5f",
+        "sha256": "cc41b6204fbeb7700640fe9a47c3db8d7d64549c21edf15d3a79248c0bdf7d19",
+        "size_bytes": 3858518016,
+        "snapshot_id": "1",
+        "source_checkpoint": {
+          "committed_event_id": "1000000",
+          "epoch": "benchmark-epoch",
+          "source_id": "scout-observer"
+        },
+        "watermarks": [
+          {
+            "generation": "0",
+            "max_seq": 999999,
+            "min_seq": 1,
+            "record_count": 950000,
+            "room": "synthetic-room"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_seq": 1000000,
+            "min_seq": 20,
+            "record_count": 50000,
+            "room": "synthetic-room"
+          }
+        ]
+      },
+      "manifest_canonical_hash": "3f77227117a6fe35422759f2c5554956fb2975a8420ea70c5c541534191cbea7",
+      "manifest_hash": "3f77227117a6fe35422759f2c5554956fb2975a8420ea70c5c541534191cbea7",
+      "max_memory_bytes": 536870912,
+      "max_snapshot_bytes": 4294967296,
+      "peak_rss_bytes": 33603584,
+      "preferred": false,
+      "produced_at": "2026-09-08T12:00:00.000000Z",
+      "profiles": true,
+      "publication_id": "1",
+      "published_at": "2026-09-08T12:00:00.000000Z",
+      "readiness": "TOO_SLOW",
+      "readiness_phase": "ACQUIRING",
+      "root_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-1vlg_i_m/publication",
+      "scale": "1m",
+      "selection_policy": {
+        "classifier_version": "router-evidence-classes/2",
+        "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+        "parameters": {
+          "capability_signal_seconds": 7776000,
+          "closed_tclk_seconds": 7776000,
+          "closed_work_seconds": 7776000,
+          "context_seconds": 2592000
+        },
+        "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+        "qualification_policy_version": "router-durable-qualification/v1",
+        "schema": "flop-router-projection-selection/v1",
+        "version": "router-evidence-horizons/2"
+      },
+      "size_bytes": 3858518016,
+      "size_readiness": "WARNING_LARGE",
+      "snapshot_id": "1",
+      "stage_peak_rss_bytes": {
+        "integrity_validation": 33603584,
+        "manifest_read": 33243136,
+        "pointer_read": 33243136,
+        "sqlite_open": 33243136
+      },
+      "stage_peak_rss_delta_bytes": {
+        "integrity_validation": 360448,
+        "manifest_read": 0,
+        "pointer_read": 0,
+        "sqlite_open": 0
+      },
+      "stage_seconds": {
+        "database_copy": 5.827819246100262,
+        "integrity_validation": 22.897706584015395,
+        "manifest_read": 0.0002207910001743585,
+        "pointer_read": 0.0008464170095976442,
+        "sha256": 1.286039419908775,
+        "sqlite_open": 0.00021366699365898967
+      },
+      "status": "SNAPSHOT_READ_TIMEOUT",
+      "subset_rows": null,
+      "total_acquisition_seconds": 30.156998666992877,
+      "warm": {},
+      "watermarks": [
+        {
+          "generation": "0",
+          "max_seq": 999999,
+          "min_seq": 1,
+          "record_count": 950000,
+          "room": "synthetic-room"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_seq": 1000000,
+          "min_seq": 20,
+          "record_count": 50000,
+          "room": "synthetic-room"
+        }
+      ]
+    },
+    "350k": {
+      "age_seconds": 0,
+      "cache_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-lpnu5107/cache/17dc38fd1bb1dca03e3d21329111b5c63a1edd55223b546a0cb02a709795b0ff.sqlite",
+      "changed_content": null,
+      "contract_revision": "A1",
+      "controlled_bench_workflows": 0,
+      "coverage_history": [
+        {
+          "generation": "0",
+          "max_ever_projected_seq": 349999,
+          "room": "synthetic-room",
+          "witness_record_sha256": "d5056f15eda7833dc572e3eb83ea06ace48a685ef8cf3411d7e82ab3a4b34da0",
+          "witness_source_locator": "benchmark-349999"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_ever_projected_seq": 350000,
+          "room": "synthetic-room",
+          "witness_record_sha256": "b311067dff540e25e472d9c751dc084cf94bc3d3241b51588fe6ac37ec0a3977",
+          "witness_source_locator": "benchmark-350000"
+        }
+      ],
+      "current_pointer_status": "VALID",
+      "database_content_id": "1",
+      "database_hash": "17dc38fd1bb1dca03e3d21329111b5c63a1edd55223b546a0cb02a709795b0ff",
+      "database_schema_version": "scout-router-projection/v2",
+      "deadline_seconds": 180.0,
+      "implementation_sha256": "43925bb46bcf3b8ea83b356c45152ba401884401c21f1f7966fc5a081eacb893",
+      "last_modified": "2026-09-08T20:50:16.614570+00:00",
+      "manifest": {
+        "content_created_at": "2026-09-08T12:00:00.000000Z",
+        "contract_revision": "A1",
+        "coverage_history": [
+          {
+            "generation": "0",
+            "max_ever_projected_seq": 349999,
+            "room": "synthetic-room",
+            "witness_record_sha256": "d5056f15eda7833dc572e3eb83ea06ace48a685ef8cf3411d7e82ab3a4b34da0",
+            "witness_source_locator": "benchmark-349999"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_ever_projected_seq": 350000,
+            "room": "synthetic-room",
+            "witness_record_sha256": "b311067dff540e25e472d9c751dc084cf94bc3d3241b51588fe6ac37ec0a3977",
+            "witness_source_locator": "benchmark-350000"
+          }
+        ],
+        "database": "router-projection-v2-1-17dc38fd1bb1dca03e3d21329111b5c63a1edd55223b546a0cb02a709795b0ff.sqlite",
+        "database_content_id": "1",
+        "database_schema_version": "scout-router-projection/v2",
+        "next_expiry_at": "2026-10-08T12:00:00.000000Z",
+        "produced_at": "2026-09-08T12:00:00.000000Z",
+        "publication_kind": "CONTENT",
+        "row_counts": {
+          "coverage_history": 2,
+          "durable_qualifications": 175000,
+          "interactions": 0,
+          "messages": 350000,
+          "qualification_events": 17500,
+          "selection_membership": 350000,
+          "source_provenance": 350000,
+          "watermarks": 2
+        },
+        "schema": "flop-scout-router-snapshot/v2",
+        "selection_evaluated_at": "2026-09-08T12:00:00.000000Z",
+        "selection_policy": {
+          "classifier_version": "router-evidence-classes/2",
+          "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+          "parameters": {
+            "capability_signal_seconds": 7776000,
+            "closed_tclk_seconds": 7776000,
+            "closed_work_seconds": 7776000,
+            "context_seconds": 2592000
+          },
+          "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+          "qualification_policy_version": "router-durable-qualification/v1",
+          "schema": "flop-router-projection-selection/v1",
+          "version": "router-evidence-horizons/2"
+        },
+        "selection_policy_sha256": "219730642f738fb6c94b21b4a722aa7e078a60ae7cf5c1e0e115dfe5e9c53c5f",
+        "sha256": "17dc38fd1bb1dca03e3d21329111b5c63a1edd55223b546a0cb02a709795b0ff",
+        "size_bytes": 1350615040,
+        "snapshot_id": "1",
+        "source_checkpoint": {
+          "committed_event_id": "350000",
+          "epoch": "benchmark-epoch",
+          "source_id": "scout-observer"
+        },
+        "watermarks": [
+          {
+            "generation": "0",
+            "max_seq": 349999,
+            "min_seq": 1,
+            "record_count": 332500,
+            "room": "synthetic-room"
+          },
+          {
+            "generation": "UNKNOWN_LEGACY",
+            "max_seq": 350000,
+            "min_seq": 20,
+            "record_count": 17500,
+            "room": "synthetic-room"
+          }
+        ]
+      },
+      "manifest_canonical_hash": "7767c526f52f1e5802238ee17e7356a2485b0f2f77cd0ef4619d48e5d240afb7",
+      "manifest_hash": "7767c526f52f1e5802238ee17e7356a2485b0f2f77cd0ef4619d48e5d240afb7",
+      "max_memory_bytes": 536870912,
+      "max_snapshot_bytes": 4294967296,
+      "peak_rss_bytes": 82591744,
+      "preferred": false,
+      "produced_at": "2026-09-08T12:00:00.000000Z",
+      "profile_query_plan": [
+        [
+          3,
+          0,
+          0,
+          "MATERIALIZE templates"
+        ],
+        [
+          10,
+          3,
+          216,
+          "SCAN messages"
+        ],
+        [
+          12,
+          3,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          52,
+          3,
+          0,
+          "USE TEMP B-TREE FOR count(DISTINCT)"
+        ],
+        [
+          58,
+          0,
+          0,
+          "MATERIALIZE duplicates"
+        ],
+        [
+          65,
+          58,
+          216,
+          "SCAN messages"
+        ],
+        [
+          69,
+          58,
+          0,
+          "USE TEMP B-TREE FOR GROUP BY"
+        ],
+        [
+          124,
+          0,
+          224,
+          "SCAN m USING INDEX messages_coverage"
+        ],
+        [
+          140,
+          0,
+          47,
+          "SEARCH t USING AUTOMATIC COVERING INDEX (template_normalized_hash=?) LEFT-JOIN"
+        ],
+        [
+          150,
+          0,
+          0,
+          "BLOOM FILTER ON d (sender=? AND room=? AND generation=? AND template=?)"
+        ],
+        [
+          163,
+          0,
+          47,
+          "SEARCH d USING AUTOMATIC COVERING INDEX (sender=? AND room=? AND generation=? AND template=?) LEFT-JOIN"
+        ],
+        [
+          220,
+          0,
+          0,
+          "USE TEMP B-TREE FOR LAST TERM OF ORDER BY"
+        ]
+      ],
+      "profiles": true,
+      "publication_id": "1",
+      "published_at": "2026-09-08T12:00:00.000000Z",
+      "qualification_history": {
+        "audit_only": true,
+        "events": 17500,
+        "invalidated": 17500,
+        "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+        "qualifications": 175000
+      },
+      "readiness": "WARNING_LARGE",
+      "readiness_phase": "ROUTING_READY",
+      "reused_database": false,
+      "root_path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-lpnu5107/publication",
+      "routing_cache": {
+        "path": "/private/var/folders/j3/shdns_9950b1yl5mwhl8_1j00000gn/T/router-v2-bench-lpnu5107/cache/17dc38fd1bb1dca03e3d21329111b5c63a1edd55223b546a0cb02a709795b0ff.43594bf694b1b855043f696a8b300e4eb605c7f919f17a5ce1f4657979d39b67.routing.sqlite",
+        "proof_hash": "26b8291f8aef22bcedc3d0c4e3e4fd30189086edab4322d873c6baa3d5741050",
+        "sha256": "43594bf694b1b855043f696a8b300e4eb605c7f919f17a5ce1f4657979d39b67",
+        "size": 869109760,
+        "version": "router-projection-summaries/1"
+      },
+      "routing_input_hash": "7261ef7fe4b5b56e17c1c2ec1775559184054e2a7fe341045d4c2cfac7e76370",
+      "rows_read": {
+        "durable_qualifications": 175000,
+        "interactions": 0,
+        "messages": 350000,
+        "qualification_events": 17500,
+        "selection_membership": 350000,
+        "source_provenance": 350000
+      },
+      "scale": "350k",
+      "selection_policy": {
+        "classifier_version": "router-evidence-classes/2",
+        "cutoff_semantics": "trusted-first-observed-strict-before-expiry/v1",
+        "parameters": {
+          "capability_signal_seconds": 7776000,
+          "closed_tclk_seconds": 7776000,
+          "closed_work_seconds": 7776000,
+          "context_seconds": 2592000
+        },
+        "pinned_record_rules": "transitive-local-evidence-dependencies-no-implicit-unpin/v1",
+        "qualification_policy_version": "router-durable-qualification/v1",
+        "schema": "flop-router-projection-selection/v1",
+        "version": "router-evidence-horizons/2"
+      },
+      "size_bytes": 1350615040,
+      "size_readiness": "WARNING_LARGE",
+      "snapshot_id": "1",
+      "stage_peak_rss_bytes": {
+        "capability_support_derivation": 82591744,
+        "controlled_bench_linkage": 82591744,
+        "duplicate_processing": 78725120,
+        "evidence_materialization": 82591744,
+        "integrity_validation": 35684352,
+        "interaction_loading": 82591744,
+        "interactions_loading": 35684352,
+        "manifest_read": 35684352,
+        "membership_loading": 35684352,
+        "messages_loading": 35684352,
+        "pointer_read": 35651584,
+        "profile_construction": 82591744,
+        "qualification_event_loading": 44875776,
+        "qualification_loading": 45989888,
+        "qualification_records_loading": 39813120,
+        "routing_state_construction": 82591744,
+        "schema_validation": 35684352,
+        "source_provenance_loading": 35684352,
+        "sqlite_open": 35684352,
+        "watermark_validation": 35684352,
+        "workflow_reconstruction": 45989888
+      },
+      "stage_peak_rss_delta_bytes": {
+        "capability_support_derivation": 36241408,
+        "controlled_bench_linkage": 0,
+        "duplicate_processing": 32374784,
+        "evidence_materialization": 36601856,
+        "integrity_validation": 0,
+        "interaction_loading": 0,
+        "manifest_read": 32768,
+        "pointer_read": 32768,
+        "profile_construction": 0,
+        "qualification_loading": 10305536,
+        "routing_state_construction": 0,
+        "schema_validation": 0,
+        "sqlite_open": 0,
+        "watermark_validation": 0,
+        "workflow_reconstruction": 0
+      },
+      "stage_seconds": {
+        "capability_support_derivation": 49.77668283399544,
+        "controlled_bench_linkage": 0.0032296249992214143,
+        "database_copy": 1.5745263150602113,
+        "duplicate_processing": 1.186594333004905,
+        "evidence_materialization": 59.96977708299528,
+        "integrity_validation": 8.021766499994555,
+        "interaction_loading": 0.0005371670122258365,
+        "interactions_loading": 5.733300349675119e-05,
+        "manifest_read": 0.00023025000700727105,
+        "membership_loading": 3.0097295829909854,
+        "messages_loading": 5.647783583990531,
+        "pointer_read": 0.0003486660134512931,
+        "profile_construction": 9.769947791995946,
+        "qualification_event_loading": 2.0249959169887006,
+        "qualification_loading": 19.078850874997443,
+        "qualification_records_loading": 16.58466283301823,
+        "routing_state_construction": 0.03702666700701229,
+        "schema_validation": 16.853864833014086,
+        "sha256": 0.44983614393277094,
+        "source_provenance_loading": 7.353849665989401,
+        "sqlite_open": 0.00022666697623208165,
+        "watermark_validation": 0.0502155410067644,
+        "workflow_reconstruction": 0.020858542004134506
+      },
+      "status": "PASS",
+      "subset_rows": null,
+      "total_acquisition_seconds": 106.02371695899637,
+      "validated_content": {
+        "checksum": "a6ea20bd339b2c657abcd5589ac7c8df74042543417465476fd4e9c4c28b436e",
+        "database_hash": "17dc38fd1bb1dca03e3d21329111b5c63a1edd55223b546a0cb02a709795b0ff",
+        "qualification_history": {
+          "audit_only": true,
+          "events": 17500,
+          "invalidated": 17500,
+          "local_proof_authority": "PRODUCER_ASSERTION_NOT_INDEPENDENTLY_ATTESTED",
+          "qualifications": 175000
+        },
+        "routing_input_hash": "7261ef7fe4b5b56e17c1c2ec1775559184054e2a7fe341045d4c2cfac7e76370",
+        "version": "router-v2-a1-validator/2"
+      },
+      "warm": {
+        "first_heartbeat": {
+          "peak_rss_bytes": 82591744,
+          "readiness": "WARNING_LARGE",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.41002783400472254,
+            "manifest_read": 0.00016083300579339266,
+            "pointer_read": 0.00010529099381528795,
+            "prior_copy_verification": 0.7143952920159791,
+            "routing_state_construction": 0.03004337500897236,
+            "sqlite_open": 0.00020520901307463646
+          },
+          "total_acquisition_seconds": 1.1254251670034137,
+          "validation_cache_reused": true
+        },
+        "restart_heartbeat": {
+          "peak_rss_bytes": 82591744,
+          "readiness": "WARNING_LARGE",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.3826388329907786,
+            "manifest_read": 0.00018266597180627286,
+            "pointer_read": 0.0005704160139430314,
+            "prior_copy_verification": 0.5688680830062367,
+            "routing_state_construction": 0.03169362500193529,
+            "sqlite_open": 0.00017870799638330936
+          },
+          "total_acquisition_seconds": 0.9528263749962207,
+          "validation_cache_reused": true
+        },
+        "steady_heartbeat": {
+          "peak_rss_bytes": 82591744,
+          "readiness": "WARNING_LARGE",
+          "routing_cache_reused": true,
+          "stage_seconds": {
+            "evidence_materialization": 0.029308166005648673,
+            "manifest_read": 0.0001782500185072422,
+            "pointer_read": 6.491699605248868e-05,
+            "prior_copy_verification": 4.06669860240072e-05,
+            "routing_state_construction": 0.029256333014927804,
+            "sqlite_open": 0.00011637501302175224
+          },
+          "total_acquisition_seconds": 0.02991795801790431,
+          "validation_cache_reused": true
+        }
+      },
+      "watermarks": [
+        {
+          "generation": "0",
+          "max_seq": 349999,
+          "min_seq": 1,
+          "record_count": 332500,
+          "room": "synthetic-room"
+        },
+        {
+          "generation": "UNKNOWN_LEGACY",
+          "max_seq": 350000,
+          "min_seq": 20,
+          "record_count": 17500,
+          "room": "synthetic-room"
+        }
+      ],
+      "workflow_closures_validated": true
+    }
+  },
+  "schema": "router-v2-a1-readiness-envelope/v1"
+}

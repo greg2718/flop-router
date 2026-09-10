@@ -75,15 +75,183 @@ Router consumes normalized TCLK observations as evidence for settlement compatib
 
 ## Shadow Worker
 
-The persistent worker is local-only and produces unsigned shadow recommendations. It never loads the Router private key during polling and performs no posting, claiming, signing, Bench invocation, Sentinel override, or settlement action:
+**V2/A1 and A1-LG2 consumer development candidate; not deployed.** The worker accepts
+[V2/A1 and A1-LG2 projections](docs/SCOUT_ROUTER_SNAPSHOT_V2.md). Scout's producer is implemented
+but not deployed. The retained [V1 contract](docs/SCOUT_ROUTER_SNAPSHOT_V1.md) and
+V1 reader are historical compatibility fixtures, not an automatic fallback.
+See the [performance correction and measured limits](docs/ROUTER_V2_A1_PERFORMANCE_REVIEW.md).
 
-```text
-.venv/bin/python router.py worker once --state-dir ~/.flop_agents/router --shadow
-.venv/bin/python router.py worker run --state-dir ~/.flop_agents/router --poll-interval 60 --max-backoff 300 --shadow
-.venv/bin/python router.py worker status --state-dir ~/.flop_agents/router
+The [A1-LG2 compact legacy-report contract](docs/SCOUT_ROUTER_SNAPSHOT_V2.md#lg2-compact-legacy-report-storage)
+replaces LG1's oversized per-row JSON with normalized report/witness tables.
+LG1 authority semantics remain unchanged: captured UNKNOWN_LEGACY, reported
+zero/one as audit metadata only. Scout and Router now implement LG2; Router
+explicitly rejects LG1 publications and mixed encodings. See the
+[LG2 consumer results and limitations](docs/ROUTER_A1_LG2_CONSUMER_REVIEW.md).
+A fresh temporary state may accept LG2 directly. Existing A1/LG1 checkpoints
+require explicit `--activate-scout-lg2`, preserved historical artifacts and a new
+CONTENT publication; validation and routing caches rebuild. This is development
+qualification, not deployment approval. No production worker start is authorized.
+The subsequent [production-shaped TCLK linkage review](docs/ROUTER_TCLK_LINKAGE_REVIEW.md)
+keeps handoff blocked: the producer stopped before creating a valid projection.
+`offer_id` is not an authoritative tclk/1 ACCEPT field; no alias or runtime fix
+is authorized. The report also records a conservative-retention gap for review.
+Keep production stopped. Neither passing schema validation nor fitting below
+4 GiB establishes operational qualification.
+
+The proposed [A1-LG2-TL1 legacy reconciliation design](docs/ROUTER_TCLK_LEGACY_RECONCILIATION_DESIGN.md)
+has an approved structural schema pin (`tclk1-tl1-structural-schema/v1`) for
+implementation: only the exact pinned JSON Schema determines structural cohort
+nonconformance; reference-decoder results cannot change historical membership.
+See the design for the immutable revision and SHA-256. It adds authenticated-but-nonconforming,
+audit-only records, no `offer_id` alias, and conservative unresolved domain holds
+with explicit capacity stops. Its schema and policy are not implemented in either
+runtime here. The ClosureVerifier safety correction and production qualification
+remain required before handoff; current A1-LG2 behavior is not repaired by this document.
+
+A1 keeps durable qualification/history separately from current support. Duplicate
+downgrades do not erase original evidence; append-only supersession/invalidation
+records remain in verified Router-owned copies. Audit transport does not award
+STRONG_SUPPORT or independent reputation. Explicitly configured, exactly linked
+local Bench originals can contribute controlled validation confidence; an opaque
+audit record alone cannot.
+
+The worker produces local unsigned shadow recommendations. Polling never loads signing identity, posts to Technocore, invokes Bench, claims work, or executes settlement. `worker once` runs one cycle; `worker run` polls continuously; `worker status` prints persisted state as JSON and checks the PID lock. Process `running` is liveness, not input readiness.
+
+Worker input arguments belong **after `worker run` or `worker once`**:
+
+| Argument | Policy |
+| --- | --- |
+| `--scout-snapshot-root PATH` | Required Scout immutable publication directory. Omission/missing publication degrades readiness. |
+| `--max-snapshot-age SECONDS` | Finite positive freshness limit; default 3600 seconds. |
+| `--max-snapshot-bytes BYTES` | Positive integer, default/hard maximum 4294967296 (4 GiB); may tighten, never silently increase. No 8-GiB override is implemented. |
+| `--snapshot-timeout SECONDS` | Positive finite acquisition and profile-construction deadline; default 30. |
+| `--max-projection-memory BYTES` | Positive process peak-RSS guard; default 536870912 (512 MiB). Exceeding it requires a fresh process before recovery. |
+| `--activate-scout-lg2` | Explicit migration of an accepted A1 or supplied LG1 candidate checkpoint to LG2. Archives the old checkpoint/private copy, validates continuity and rebuilds caches. No downgrade or automatic conversion. |
+| `--activate-scout-v2` | Required only to migrate a retained V1 checkpoint. Preserve V1 provenance and enforce global ID/time continuity. New state uses V2 directly. |
+| `--validation-store PATH` | Optional local validation-attempt JSONL. Omission explicitly means disabled/unconfigured. |
+| `--ingest-store PATH` | Optional normalized Scout export-observation JSONL. Omission explicitly means disabled/unconfigured. |
+| `--tclk-store PATH` | Optional normalized TCLK observation JSONL. Omission explicitly means disabled/unconfigured. |
+| `--bench-proof-store PATH` | Optional explicit Router-local `router-bench-proof/v1` JSONL originals. Disabled when omitted; missing/malformed configured files degrade readiness. |
+| `--task-inbox PATH` | Router-owned task JSONL; defaults to `<state-dir>/worker/tasks.jsonl`. Initialized exclusively as an empty file on first use if absent. Existing contents are preserved. |
+
+Every configured path is expanded and resolved absolutely at startup. No worker evidence source inherits a `devdata` default. Existing global `--db`, `--validation-store`, `--ingest-store`, `--tclk-store`, and `--verification-evidence-store` remain available to other commands with their development defaults, but are rejected for worker commands to prevent ambiguous configuration.
+
+`verification_evidence.jsonl` remains the normalized lifecycle audit store, not
+an original-proof store or validation-attempt store. Its global CLI option is
+still rejected for workers. The new `--bench-proof-store` is an explicit input
+with [a separate proof envelope and scoring boundary](docs/ROUTER_V2_A1_PERFORMANCE_REVIEW.md#controlled-bench-originals).
+Router never follows a path or URL embedded in a Scout proof reference. A Bench
+PASS without an explicit tested capability remains unscored. Accepted, currently
+valid linked originals may affect controlled confidence under the existing
+validation policy; they never count as independent counterparties. Invalidated or
+superseded results confer no current credit. Conflicting effective PASS/FAIL for
+one request yields FAIL. `verification_evidence_count` counts accepted validation
+attempts plus eligible controlled Bench validations. Optional JSONL parsing is
+strict, rejects duplicate keys, and limits each record to 4 MiB; the proof store
+also has a 16-MiB file limit.
+
+The worker consumes the [Scout publication contract V2/A1 or A1-LG2](docs/SCOUT_ROUTER_SNAPSHOT_V2.md): atomic `current.json`, a hash-addressed immutable manifest, and a standalone SQLite online-backup artifact produced by Scout. It never opens live Scout SQLite or copies WAL/SHM/journal files. `--scout-db` is explicitly rejected as unsafe/deprecated.
+
+Router retains the publication directory descriptor, rejects symlinks, and opens each artifact relative to that descriptor. Bounded pointer/manifest parsing, hash-embedded filenames, descriptor-bound database copying, size/SHA-256 verification, SQLite integrity/schema checks, and exact database watermarks precede routing. Only a verified mode-0600 temporary copy is opened through SQLite (`mode=ro`, `query_only=ON`); candidate directories are removed on failure/cancellation. Accepted immutable copies are retained under `<state-dir>/worker/v2-copies` for history and restart continuity. Publication files remain read-only. The contract is a trusted local-operator consistency boundary, not independent producer attestation or a signature claim.
+
+Separate publication/content IDs, hashes, times, policy, selected-scope watermarks and cumulative historical witnesses are persisted in `last_accepted_projection_v2`. Heartbeats may advance publication identity while reusing the last verified database. Every restart rehashes the prior private copy. Missing/corrupt continuity state blocks acceptance. Rollback, same-ID hash conflict, unsupported schema, and watermark regression fail closed. A retained root descriptor prevents parent-path replacement from substituting another publication directory.
+
+All enabled sources must pass validation before routing; the Scout source is a directory containing regular publication artifacts. A configured optional source is just as readiness-blocking as Scout. Each cycle and status contains a `sources` manifest with name, absolute path, enabled/required flags, existence/readability/validity, type, modification time where available, record count, and safe reason code. `scout_snapshot` also reports pointer status, snapshot ID, hashes, production time, age, schema version, and watermarks. Disabled sources have null paths and `DISABLED_UNCONFIGURED`. Scout freshness is enforced by `--max-snapshot-age`; other evidence has no new freshness policy.
+
+- `READY_IDLE`: every enabled source is valid; no new decision is needed, including empty inputs or deduplicated tasks.
+- `READY_ACTIVE`: every enabled source is valid and new shadow decisions were produced.
+- `DEGRADED_INPUT_MISSING`, `DEGRADED_INPUT_UNREADABLE`, `DEGRADED_INPUT_INVALID`: at least one enabled source failed inspection; no routing decisions are produced.
+- `DEGRADED_INPUT_STALE`: the Scout publication exceeds the configured age limit; no routing decisions are produced.
+- `ERROR`: cycle processing failed or was cancelled; an error cycle and state update are persisted.
+
+V2 source readiness additionally reports `READY`, `WARNING_LARGE`, `TOO_LARGE`,
+`TOO_SLOW`, `MEMORY_LIMIT`, `STALE`, `INVALID`, `UNSUPPORTED_POLICY`, or
+`CONTINUITY_FAILURE`. Warnings require operator qualification; failed readiness
+never routes. Per-stage timings distinguish pointer/manifest reads, copy, SHA-256,
+SQLite open/integrity, schema/rows, watermarks, qualifications, evidence and profiles.
+The byte target remains preferred <512 MiB and normally qualified <1 GiB; a
+1–4 GiB artifact is `WARNING_LARGE`, not a production recommendation.
+
+Unresolved Kibble workflows require a uniquely scoped authenticated JOB, an
+exact linked RESULT/DELIVER, and the issuer's unambiguous ACCEPT before finite
+retention is accepted. TCLK expiry-only closure requires an authenticated offer,
+a valid elapsed deadline and no linked transition. Unknown generic terminal
+grammars and missing/conflicting proof fail closed. Bench originals validate
+request/result closure but their permanent retention never becomes time-limited.
+
+Raw message text is streamed into Router-derived private SQLite summaries.
+Duplicate groups, capability aggregates and qualification history use indexed
+queries; candidate profiles load on demand. Producer capability labels are not
+scoring authority. The accepted database and compact routing store are separately
+hash-bound. After restart Router rehashes both private files before reusing their
+validation; unchanged in-process file identities/size/mtime/ctime permit cheap
+heartbeat reuse. Changed content receives full integrity, schema, policy, history
+and continuity validation. No `quick_check` substitution is implemented.
+Obsolete source copies are removed only after a ready checkpoint is durable;
+failed/cancelled acquisition preserves the previous checkpoint. Budget disk for
+prior and candidate databases, private summary stores and temporary SQL indexes.
+Status `current_support` samples at most 1,000 DIDs with capabilities;
+`current_support_scope` reports completeness, total count and the full index
+path. Explanatory direct-edge lists show at most 100 descriptions per profile;
+complete counts and substantive input hashes still drive routing.
+Source `readiness_phase` reports the last completed preparation step:
+`CONTENT_VALIDATED`, `INDEX_READY`, then `ROUTING_READY`. Only the worker can
+reach the last phase after all enabled inputs and final state/resource checks
+pass. This progress field does not override the cycle's current readiness or
+error status. Stage metrics include process high-water RSS and its increase
+during the stage; nested stage deltas overlap.
+
+The loop retries failures on exponential backoff capped by `--max-backoff` (default 300 seconds), then returns to `--poll-interval` (default 60 seconds) after recovery. An initialized inbox disappearing later is a failure, including after restart; it is not silently recreated. `last_success_at` remains the historical last success, while current `status`/`readiness`, failure count, and error timestamps identify failure. SIGTERM/SIGINT cancel both `once` and `run`, wake polling waits, clean temporary artifacts, and release the lock. Bounded reads, SQLite progress callbacks, and Python computation checks handle cancellation. Decisions are prepared in a private temporary history file with cancellable bounded copying; only the final atomic rename masks signals. Polling cancellation is persisted. Cooperative checks require filesystem/SQLite calls to return.
+
+The worker appends cycle records and preserves existing history. State from `f5ca717` remains readable; status reports `UNKNOWN_LEGACY` until a new validated cycle. Foundation history remains readable. V1 publication checkpoints require explicit migration; their original fields are preserved. Shadow policy `flop-router-shadow/v4-v2-a1-stream` hashes loaded substantive routing evidence and profile fields, including interactions, trust/risk, validations, TCLK, and generation-aware identities. Clock-derived activity-recency labels/components are excluded. Publication IDs, publication times, and artifact hashes are provenance, not routing evidence, and do not independently trigger decisions. Worker work qualification has no time-based capability expiry; worker plans use default constraints without requesting settlement, so settlement expiry is not a worker reevaluation boundary. Existing decision IDs are retained; the new snapshot/policy causes one intentional reevaluation of existing tasks after upgrade. Subsequent unchanged tasks remain deduplicated across recovery/restart. Signed routing-decision schemas and hashes are unchanged. There are no ingestion cursors to reset.
+
+Structured JSON stdout events cover startup, resolved configuration, readiness transitions, source failure/recovery, cycle summaries, and shutdown. Unchanged idle/failure summaries are limited to once per 15 minutes; every cycle is still persisted. Raw source contents and exception messages are not logged.
+
+**Do not restart production or load launchd.** Scout is implemented but not deployed,
+and current end-to-end capacity is substantially below the nominal byte targets.
+After coordinated review, deployment authorization and producer qualification,
+the proposed foreground command below checks a publication. A retained V1 checkpoint
+also requires separately reviewed `--activate-scout-v2` migration. This is not
+permission to use live state during development:
+
+```sh
+/Users/greg/Dev/flop-router/.venv/bin/python /Users/greg/Dev/flop-router/router.py worker once --state-dir /Users/greg/.flop_agents/router --scout-snapshot-root /Users/greg/.flop_scout/router-publication --max-snapshot-age 3600 --task-inbox /Users/greg/.flop_agents/router/worker/tasks.jsonl --shadow
 ```
 
-Optional local tasks are read from `~/.flop_agents/router/worker/tasks.jsonl`. Worker state and shadow decisions are persisted under the same ignored worker directory. Unchanged task/evidence/policy inputs are suppressed by a stable shadow identity.
+Require exit code 0, a final `READY_IDLE` or `READY_ACTIVE` cycle, and valid Scout/inbox manifest entries. Omitted optional evidence sources in this command are deliberately disabled. If enabling one, add its explicit absolute path to both foreground and launchd arguments and repeat validation. `worker once` exits 1 on degraded/error readiness. Status can be inspected with:
+
+```sh
+/Users/greg/Dev/flop-router/.venv/bin/python /Users/greg/Dev/flop-router/router.py worker status --state-dir /Users/greg/.flop_agents/router
+```
+
+Proposed launchd configuration fragment (documentation only):
+
+```xml
+<key>ProgramArguments</key>
+<array>
+    <string>/Users/greg/Dev/flop-router/.venv/bin/python</string>
+    <string>/Users/greg/Dev/flop-router/router.py</string>
+    <string>worker</string>
+    <string>run</string>
+    <string>--state-dir</string>
+    <string>/Users/greg/.flop_agents/router</string>
+    <string>--scout-snapshot-root</string>
+    <string>/Users/greg/.flop_scout/router-publication</string>
+    <string>--max-snapshot-age</string>
+    <string>3600</string>
+    <string>--task-inbox</string>
+    <string>/Users/greg/.flop_agents/router/worker/tasks.jsonl</string>
+    <string>--poll-interval</string>
+    <string>60</string>
+    <string>--max-backoff</string>
+    <string>300</string>
+    <string>--shadow</string>
+</array>
+<key>WorkingDirectory</key>
+<string>/Users/greg/Dev/flop-router</string>
+```
+
+`WorkingDirectory` is defense in depth: correctness comes from explicit absolute input arguments. **Do not load the launchd plist until source validation and the foreground shadow cycle above succeed.** This correction does not edit or load `~/Library/LaunchAgents/com.greg.flop-router.worker.plist`; keep the live worker stopped pending review.
 
 ### Selection scoring
 

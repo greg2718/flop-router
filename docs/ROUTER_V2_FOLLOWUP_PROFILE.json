@@ -1,0 +1,200 @@
+{
+  "stages": {
+    "pointer_read": {
+      "current_traced_bytes": 87802,
+      "peak_traced_bytes": 94038,
+      "net_bytes": 20237,
+      "peak_rss": 43532288
+    },
+    "manifest_read": {
+      "current_traced_bytes": 114584,
+      "peak_traced_bytes": 157304,
+      "net_bytes": 26614,
+      "peak_rss": 43614208
+    },
+    "sqlite_open": {
+      "current_traced_bytes": 143542,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 9670,
+      "peak_rss": 43712512
+    },
+    "integrity_validation": {
+      "current_traced_bytes": 144621,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 1223,
+      "peak_rss": 46170112
+    },
+    "schema_validation": {
+      "current_traced_bytes": 204097,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 59372,
+      "peak_rss": 46432256
+    },
+    "watermark_validation": {
+      "current_traced_bytes": 210247,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 6106,
+      "peak_rss": 46432256
+    },
+    "qualification_loading": {
+      "current_traced_bytes": 595137,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 383056,
+      "peak_rss": 47284224
+    },
+    "workflow_reconstruction": {
+      "current_traced_bytes": 596188,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 955,
+      "peak_rss": 47284224
+    },
+    "duplicate_processing": {
+      "current_traced_bytes": 719171,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 2824,
+      "peak_rss": 47955968
+    },
+    "capability_support_derivation": {
+      "current_traced_bytes": 1634261,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 919298,
+      "peak_rss": 50528256
+    },
+    "interaction_loading": {
+      "current_traced_bytes": 1635818,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 1477,
+      "peak_rss": 50528256
+    },
+    "profile_construction": {
+      "current_traced_bytes": 1645541,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 9411,
+      "peak_rss": 52183040
+    },
+    "controlled_bench_linkage": {
+      "current_traced_bytes": 1661422,
+      "peak_traced_bytes": 2229781,
+      "net_bytes": 15761,
+      "peak_rss": 52183040
+    },
+    "routing_state_construction": {
+      "current_traced_bytes": 1655030,
+      "peak_traced_bytes": 3760284,
+      "net_bytes": 10298,
+      "peak_rss": 53493760
+    },
+    "evidence_materialization": {
+      "current_traced_bytes": 1653406,
+      "peak_traced_bytes": 3760284,
+      "net_bytes": 1058962,
+      "peak_rss": 53493760
+    }
+  },
+  "sql_calls": 5782,
+  "sql_fingerprints": [
+    [
+      "INSERT INTO observations VALUES (?,?,?,?,NULL,?,?,?,?)",
+      1000
+    ],
+    [
+      "INSERT INTO semantic_audit VALUES (?)",
+      550
+    ],
+    [
+      "INSERT INTO firsts VALUES (?)",
+      500
+    ],
+    [
+      "INSERT OR IGNORE INTO hits VALUES (?,?,?,?,?,?.?,?,?,?,?,?,?)",
+      500
+    ],
+    [
+      "SELECT count(*),COALESCE(sum(strong),?),COALESCE(sum(medium),?),COALESCE(sum(verified),?) FROM positives WHERE did=? AND capability=?",
+      500
+    ],
+    [
+      "SELECT count(DISTINCT location) FROM hits WHERE did=? AND capability=? AND positive=?",
+      500
+    ],
+    [
+      "SELECT payload FROM positives WHERE did=? AND capability=? ORDER BY quality DESC,ordinal LIMIT ?",
+      500
+    ],
+    [
+      "SELECT payload FROM hits WHERE did=? AND capability=? AND positive=? ORDER BY ordinal LIMIT ?",
+      500
+    ],
+    [
+      "SELECT type,count(*) FROM positives WHERE did=? AND capability=? GROUP BY type",
+      500
+    ],
+    [
+      "INSERT INTO capabilities VALUES (?,?,?)",
+      500
+    ],
+    [
+      "SELECT ? FROM durable_qualifications WHERE qualification_id=?",
+      50
+    ],
+    [
+      "SELECT record_json FROM durable_qualifications WHERE qualification_id=?",
+      50
+    ],
+    [
+      "SELECT m.message_hash,CASE WHEN m.message_hash IS NULL THEN m.text END AS text,s.retain_until FROM messages m JOIN selection_membership s ON s.entity_type=? AND s.projection_row_id=m.projection_row_id WHERE m.projection_row_id=?",
+      10
+    ],
+    [
+      "PRAGMA cache_size=-?",
+      6
+    ],
+    [
+      "PRAGMA query_only=ON",
+      5
+    ],
+    [
+      "BEGIN ",
+      4
+    ],
+    [
+      "COMMIT",
+      3
+    ],
+    [
+      "PRAGMA temp_store=FILE",
+      3
+    ],
+    [
+      "INSERT INTO watermarks VALUES (?,?,?,?,?)",
+      2
+    ],
+    [
+      "SELECT * FROM messages WHERE room=? AND generation=? AND seq=?",
+      2
+    ]
+  ],
+  "live_allocations": 14089,
+  "top_allocations": [
+    "/Users/greg/Dev/flop-router/projection_routing.py:174: size=306 KiB, count=1256, average=250 B",
+    "/Users/greg/Dev/flop-router/router.py:603: size=95.9 KiB, count=133, average=739 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pstats.py:549: size=76.2 KiB, count=1220, average=64 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/dataclasses.py:1250: size=75.3 KiB, count=404, average=191 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/cProfile.py:88: size=73.5 KiB, count=1045, average=72 B",
+    "<frozen importlib._bootstrap_external>:729: size=70.4 KiB, count=407, average=177 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/re/_compiler.py:761: size=68.3 KiB, count=182, average=384 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/dataclasses.py:1503: size=56.5 KiB, count=423, average=137 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pstats.py:266: size=52.9 KiB, count=484, average=112 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/cProfile.py:127: size=38.5 KiB, count=616, average=64 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/pstats.py:298: size=37.7 KiB, count=483, average=80 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/cProfile.py:68: size=37.6 KiB, count=481, average=80 B",
+    "/Users/greg/Dev/flop-router/router.py:1837: size=26.6 KiB, count=324, average=84 B",
+    "/Users/greg/Dev/flop-router/router.py:112: size=25.6 KiB, count=324, average=81 B",
+    "/Users/greg/Dev/flop-router/router.py:1979: size=25.0 KiB, count=256, average=100 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/json/decoder.py:329: size=23.0 KiB, count=381, average=62 B",
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/re/__init__.py:302: size=19.8 KiB, count=174, average=117 B",
+    "/Users/greg/Dev/flop-router/router.py:1866: size=17.7 KiB, count=216, average=84 B",
+    "/Users/greg/Dev/flop-router/router.py:2036: size=14.2 KiB, count=54, average=269 B",
+    "/Users/greg/Dev/flop-router/router.py:592: size=13.4 KiB, count=130, average=106 B"
+  ]
+}
