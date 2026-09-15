@@ -133,8 +133,16 @@ Worker input arguments belong **after `worker run` or `worker once`**:
 | `--tclk-store PATH` | Optional normalized TCLK observation JSONL. Omission explicitly means disabled/unconfigured. |
 | `--bench-proof-store PATH` | Optional explicit Router-local `router-bench-proof/v1` JSONL originals. Disabled when omitted; missing/malformed configured files degrade readiness. |
 | `--task-inbox PATH` | Router-owned task JSONL; defaults to `<state-dir>/worker/tasks.jsonl`. Initialized exclusively as an empty file on first use if absent. Existing contents are preserved. |
+| `--sentinel-executable PATH` | Explicit Sentinel venv Python executable; defaults to the reviewed local Sentinel venv and is never resolved through `PATH`/`PYTHONPATH`. |
+| `--sentinel-timeout SECONDS` | Finite positive per-task screening deadline; default 5 seconds. Timeout or any invalid/missing Sentinel result fails closed. |
 
 Every configured path is expanded and resolved absolutely at startup. No worker evidence source inherits a `devdata` default. Existing global `--db`, `--validation-store`, `--ingest-store`, `--tclk-store`, and `--verification-evidence-store` remain available to other commands with their development defaults, but are rejected for worker commands to prevent ambiguous configuration.
+
+Before a task is routed, its extracted `{task_id, task}` pair is screened by
+Sentinel v0.2 in an isolated child process. `R-110/WARN` is the documented
+unsigned-task floor and can route; `QUARANTINE`, `REJECT`, unavailable/timeout,
+malformed, unknown, or version-mismatched verdicts produce no qualified route.
+See [the Sentinel integration pin and soak set](docs/SENTINEL_ROUTER_INTEGRATION.md).
 
 `verification_evidence.jsonl` remains the normalized lifecycle audit store, not
 an original-proof store or validation-attempt store. Its global CLI option is

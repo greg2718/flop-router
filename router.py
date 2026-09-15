@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import stat
+import subprocess
 import threading
 from contextlib import contextmanager, nullcontext
 import sqlite3
@@ -59,6 +60,22 @@ LOCAL_OPERATOR_GROUP = "flop-labs-local"
 ROUTER_OPERATOR_GROUP = "local-flop-agent-family"
 ROUTER_CANONICAL_ROOM = "d-flop-router"
 ROUTER_MAILBOX = "mb-flop-router"
+
+# Sentinel's Router adapter is a Python API, so invoke it in its own virtual
+# environment rather than importing it into Router.  This is intentionally an
+# explicit path, never a PATH/PYTHONPATH lookup.  The revision is pinned in
+# docs/SENTINEL_ROUTER_INTEGRATION.md.
+DEFAULT_SENTINEL_EXECUTABLE = Path("/Users/greg/Dev/flop_sentinel/.venv/bin/python")
+DEFAULT_SENTINEL_TIMEOUT = 5.0
+SENTINEL_INPUT_SCHEMA = "sentinel-router-task/v1"
+SENTINEL_OUTPUT_SCHEMA = "sentinel-router-verdict/v1"
+SENTINEL_SCHEMA_VERSION = "2"
+SENTINEL_POLICY_VERSION = "2"
+_SENTINEL_BRIDGE = (
+    "import json,sys\n"
+    "from flop_sentinel.adapters.router import screen_router_task\n"
+    "print(json.dumps(screen_router_task(json.load(sys.stdin)), sort_keys=True))\n"
+)
 
 VERIFICATION_STATES = {
     "VERIFIED_OFFLINE",
@@ -344,6 +361,14 @@ class ExecutionPlan:
     qualification: str
     reasons: list[str]
     reason_codes: list[str] = field(default_factory=list)
+
+
+class SentinelScreeningError(ValueError):
+    """A safe, stable reason for refusing an unverified screening result."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 @dataclass
@@ -4964,8 +4989,9 @@ def independent_operator_group_count(evidence_items: Iterable[SettlementEvidence
     return len(groups)
 
 
-def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], constraints: ExecutionConstraints) -> ExecutionPlan:
-    routed = Router(profiles).route(task_text, top=10)
+def create_execution_plan(task_text: str, profiles: dict[str, AgentProfile], constraints: ExecutionConstraints,
+                          routed: RoutingResult | None = None) -> ExecutionPlan:
+    routed = routed or Router(profiles).route(task_text, top=10)
     reasons = []
     settlement_requested = settlement_constraints_requested(constraints)
     if not routed.candidates:
@@ -5281,6 +5307,110 @@ def verify_evidence_consistency(
 WORKER_POLICY_VERSION = "flop-router-shadow/v4-v2-a1-stream"
 WORKER_IDLE_LOG_SECONDS = 900.0
 
+# The full v0.2 policy table.  R-090/R-100/R-900 are structurally
+# unreachable on the current unsigned Router task path, but retaining their
+# documented mappings makes a version-valid verdict auditable rather than
+# treating a known table entry as an unspecified decision.
+_SENTINEL_POLICY_TABLE = {
+    ("R-000", "QUARANTINE", "HIGH", "EVALUATION_INCOMPLETE"),
+    ("R-005", "QUARANTINE", "HIGH", "EVALUATION_INCOMPLETE"),
+    ("R-010", "REJECT", "CRITICAL", "DETERMINISTIC_MATCH"),
+    ("R-015", "QUARANTINE", "HIGH", "EVALUATION_INCOMPLETE"),
+    ("R-020", "REJECT", "CRITICAL", "DETERMINISTIC_MATCH"),
+    ("R-030", "REJECT", "HIGH", "DETERMINISTIC_MATCH"),
+    ("R-040", "QUARANTINE", "HIGH", "DETERMINISTIC_MATCH"),
+    ("R-050", "QUARANTINE", "HIGH", "DETERMINISTIC_MATCH"),
+    ("R-060", "QUARANTINE", "HIGH", "DETERMINISTIC_MATCH"),
+    ("R-070", "QUARANTINE", "MEDIUM", "EVALUATION_INCOMPLETE"),
+    ("R-080", "QUARANTINE", "MEDIUM", "DETERMINISTIC_MATCH"),
+    ("R-090", "WARN", "MEDIUM", "DETERMINISTIC_MATCH"),
+    ("R-100", "WARN", "LOW", "DETERMINISTIC_MATCH"),
+    ("R-110", "WARN", "LOW", "DETERMINISTIC_MATCH"),
+    ("R-900", "ALLOW", "NONE", "NO_MATCH_FOUND"),
+}
+
+
+def _validate_sentinel_verdict(verdict: object, task_id: str | None, task_text: str) -> dict[str, str]:
+    if not isinstance(verdict, dict):
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    required = {
+        "schema", "sentinel_schema_version", "sentinel_policy_version", "decision", "risk", "rule_id",
+        "basis", "provenance", "operator_affiliation", "artifact_sha256", "task_id",
+    }
+    if set(verdict) != required:
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    if (verdict["schema"] != SENTINEL_OUTPUT_SCHEMA
+            or verdict["sentinel_schema_version"] != SENTINEL_SCHEMA_VERSION
+            or verdict["sentinel_policy_version"] != SENTINEL_POLICY_VERSION):
+        raise SentinelScreeningError("SENTINEL_CONTRACT_VERSION_MISMATCH")
+    if verdict["task_id"] != task_id:
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    if not all(isinstance(verdict[key], str) for key in required - {"task_id"}):
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    if not re.fullmatch(r"[0-9a-f]{64}", verdict["artifact_sha256"]):
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    if verdict["artifact_sha256"] != hashlib.sha256(task_text.encode("utf-8")).hexdigest():
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    policy_key = (verdict["rule_id"], verdict["decision"], verdict["risk"], verdict["basis"])
+    if policy_key not in _SENTINEL_POLICY_TABLE:
+        raise SentinelScreeningError("SENTINEL_UNKNOWN_POLICY_MAPPING")
+    if verdict["provenance"] not in {"SIGNED_VERIFIED", "SIGNED_INVALID", "UNSIGNED", "MALFORMED"}:
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    if verdict["operator_affiliation"] not in {"SELF_OPERATED", "UNKNOWN"}:
+        raise SentinelScreeningError("SENTINEL_SCHEMA_INVALID")
+    return {key: verdict[key] for key in required if key != "task_id"}
+
+
+def screen_router_task_with_sentinel(task_id: str | None, task_text: str, executable: Path = DEFAULT_SENTINEL_EXECUTABLE,
+                                      timeout: float = DEFAULT_SENTINEL_TIMEOUT, cwd: Path | None = None) -> dict[str, str]:
+    """Run Sentinel's authoritative Router adapter in its own interpreter."""
+    # Do not resolve the interpreter symlink: a venv's ``bin/python`` points
+    # at its base interpreter, and resolving it would discard the venv's
+    # site-packages (including the pinned Sentinel installation).
+    executable = Path(os.path.abspath(Path(executable).expanduser()))
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise SentinelScreeningError("SENTINEL_UNAVAILABLE")
+    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise SentinelScreeningError("SENTINEL_TIMEOUT")
+    envelope = {"schema": SENTINEL_INPUT_SCHEMA, "task_id": task_id, "task": task_text}
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    try:
+        completed = subprocess.run(
+            [str(executable), "-c", _SENTINEL_BRIDGE], input=json.dumps(envelope), text=True,
+            capture_output=True, timeout=timeout, check=False, cwd=str(cwd) if cwd else None, env=environment,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SentinelScreeningError("SENTINEL_TIMEOUT") from exc
+    except OSError as exc:
+        raise SentinelScreeningError("SENTINEL_UNAVAILABLE") from exc
+    except Exception as exc:
+        raise SentinelScreeningError("SENTINEL_EXCEPTION") from exc
+    if completed.returncode != 0:
+        raise SentinelScreeningError("SENTINEL_PROCESS_FAILURE")
+    try:
+        output = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise SentinelScreeningError("SENTINEL_MALFORMED_JSON") from exc
+    return _validate_sentinel_verdict(output, task_id, task_text)
+
+
+def _sentinel_security_policy(verdict: dict[str, str]) -> dict[str, str]:
+    return {"status": verdict["decision"], **{f"sentinel_{key}": value for key, value in verdict.items()}}
+
+
+def _sentinel_failure_policy(reason: str) -> dict[str, str]:
+    return {"status": "FAIL_CLOSED", "security_reason": reason, "sentinel_decision": "QUARANTINE"}
+
+
+def _sentinel_blocked_plan(security_policy: dict[str, str], reason: str) -> ExecutionPlan:
+    return ExecutionPlan(
+        worker={"did": "none", "capability_support": "security screening blocked routing"},
+        settlement_plan={"protocol": "tclk/1", "status": "NO_QUALIFIED_ROUTE", "mode": "SIMULATION_ONLY", "settlement_execution": "DISABLED"},
+        verification_plan={"mode": "OBJECTIVE_BENCH", "required": True},
+        security_policy=security_policy, qualification="DISQUALIFIED",
+        reasons=[reason], reason_codes=[reason],
+    )
+
 
 def worker_paths(state_dir: Path) -> dict[str, Path]:
     worker_dir = state_dir.expanduser().resolve() / "worker"
@@ -5365,7 +5495,9 @@ def worker_sources(state_dir: Path, scout_snapshot_root: Path | None = None,
                    max_snapshot_age: float = scout_snapshot.DEFAULT_MAX_AGE,
                    max_snapshot_bytes: int = scout_projection.MAX_BYTES,
                    snapshot_timeout: float = 30.0, max_projection_memory: int = scout_projection.MAX_MEMORY,
-                   activate_scout_v2: bool = False, bench_proof_store: Path | None = None, activate_scout_lg2: bool = False) -> list[dict]:
+                   activate_scout_v2: bool = False, bench_proof_store: Path | None = None, activate_scout_lg2: bool = False,
+                   sentinel_executable: Path = DEFAULT_SENTINEL_EXECUTABLE,
+                   sentinel_timeout: float = DEFAULT_SENTINEL_TIMEOUT) -> list[dict]:
     """None explicitly means unconfigured; workers never inherit devdata defaults."""
     if not math.isfinite(max_snapshot_age) or max_snapshot_age <= 0:
         raise ValueError("max snapshot age must be finite and positive")
@@ -5373,6 +5505,8 @@ def worker_sources(state_dir: Path, scout_snapshot_root: Path | None = None,
             or not math.isfinite(snapshot_timeout) or snapshot_timeout <= 0
             or type(max_projection_memory) is not int or max_projection_memory <= 0):
         raise ValueError("Invalid projection limits; byte ceiling may not exceed 4 GiB")
+    if not isinstance(sentinel_timeout, (int, float)) or not math.isfinite(sentinel_timeout) or sentinel_timeout <= 0:
+        raise ValueError("Sentinel timeout must be finite and positive")
     if scout_snapshot_root is not None:
         # Resolve only for output isolation; the reader retains the original
         # lexical path and separately rejects symlinks instead of hiding them.
@@ -5755,6 +5889,7 @@ def run_worker_cycle(
     max_snapshot_bytes: int = scout_projection.MAX_BYTES, snapshot_timeout: float = 30.,
     max_projection_memory: int = scout_projection.MAX_MEMORY, activate_scout_v2: bool = False,
     activate_scout_lg2: bool = False,
+    sentinel_executable: Path = DEFAULT_SENTINEL_EXECUTABLE, sentinel_timeout: float = DEFAULT_SENTINEL_TIMEOUT,
     *, sources: list[dict] | None = None, cancellation=None, snapshot_reader=None,
 ) -> dict:
     paths = worker_paths(state_dir)
@@ -5815,8 +5950,22 @@ def run_worker_cycle(
         if shadow_id in prior_ids:
             suppressed += 1
             continue
-        routed = cancellation.compute(Router(profiles).route, task_text, 5)
-        plan = cancellation.compute(create_execution_plan, task_text, profiles, ExecutionConstraints())
+        try:
+            verdict = screen_router_task_with_sentinel(
+                item["task_id"], task_text, sentinel_executable, sentinel_timeout, paths["dir"],
+            )
+            security_policy = _sentinel_security_policy(verdict)
+            if verdict["decision"] in {"QUARANTINE", "REJECT"}:
+                plan = _sentinel_blocked_plan(security_policy, f"SENTINEL_{verdict['decision']}:{verdict['rule_id']}")
+                routed = None
+            else:
+                routed = cancellation.compute(Router(profiles).route, task_text, 5)
+                plan = cancellation.compute(create_execution_plan, task_text, profiles, ExecutionConstraints(), routed)
+                plan = replace(plan, security_policy=security_policy)
+        except SentinelScreeningError as exc:
+            security_policy = _sentinel_failure_policy(exc.code)
+            plan = _sentinel_blocked_plan(security_policy, exc.code)
+            routed = None
         selected = [plan.worker["did"]] if plan.worker.get("did") not in {None, "none"} else []
         decision = {
             "schema": "flop-shadow-decision/v1",
@@ -5826,7 +5975,7 @@ def run_worker_cycle(
             "task_hash": task_hash(task_text),
             "evidence_snapshot": evidence_snapshot,
             "created_at": started,
-            "candidate_workers": [candidate.profile.identity.did for candidate in routed.candidates],
+            "candidate_workers": [candidate.profile.identity.did for candidate in routed.candidates] if routed else [],
             "qualification": plan.qualification,
             "selected_agents": selected,
             "evidence_ids": evidence_ids_for_selected_agents(profiles, selected),
@@ -5834,6 +5983,8 @@ def run_worker_cycle(
             "settlement_plan": dict(plan.settlement_plan),
             "verification_plan": dict(plan.verification_plan),
             "security_policy": dict(plan.security_policy),
+            "sentinel_invoked": True,
+            "router_route_called": routed is not None,
             "same_operator_disclosure": same_operator_disclosures(),
             "mode": "SHADOW",
             "signature_present": False,
@@ -5928,13 +6079,16 @@ def _persist_worker_cycle(state_dir: Path, cycle: dict) -> None:
     _atomic_json_write(paths["state"], state)
 
 
-def _safe_worker_cycle(state_dir: Path, sources: list[dict], cancellation=None, snapshot_reader=None) -> dict:
+def _safe_worker_cycle(state_dir: Path, sources: list[dict], cancellation=None, snapshot_reader=None,
+                       sentinel_executable: Path = DEFAULT_SENTINEL_EXECUTABLE,
+                       sentinel_timeout: float = DEFAULT_SENTINEL_TIMEOUT) -> dict:
     started = now_iso()
     owned = snapshot_reader is None and sources[0]["path"] is not None
     if owned:
         snapshot_reader = _projection_reader(sources[0], state_dir, cancellation or WorkerCancellation())
     try:
-        return run_worker_cycle(state_dir, sources=sources, cancellation=cancellation, snapshot_reader=snapshot_reader)
+        return run_worker_cycle(state_dir, sources=sources, cancellation=cancellation, snapshot_reader=snapshot_reader,
+                                sentinel_executable=sentinel_executable, sentinel_timeout=sentinel_timeout)
     except Exception as exc:
         # Never serialize exception messages: parsers may include hostile input or paths.
         if isinstance(exc, scout_snapshot.Cancelled):
@@ -6009,13 +6163,17 @@ def worker_once(state_dir: Path, **kwargs) -> dict:
         lock = acquire_worker_lock(state_dir)
         try:
             logger = WorkerLog(state_dir, sources)
-            cycle = _safe_worker_cycle(state_dir, sources, cancellation)
+            cycle = _safe_worker_cycle(state_dir, sources, cancellation,
+                                       sentinel_executable=kwargs.get("sentinel_executable", DEFAULT_SENTINEL_EXECUTABLE),
+                                       sentinel_timeout=kwargs.get("sentinel_timeout", DEFAULT_SENTINEL_TIMEOUT))
             logger.cycle(cycle)
             if cancellation.event.is_set() and cycle.get("errors") != ["WORKER_CANCELLED"]:
                 # A signal delivered just after the atomic decision commit must
                 # still leave shutdown state; the preceding cycle records any
                 # decisions already committed before cancellation delivery.
-                cycle = _safe_worker_cycle(state_dir, sources, cancellation)
+                cycle = _safe_worker_cycle(state_dir, sources, cancellation,
+                                           sentinel_executable=kwargs.get("sentinel_executable", DEFAULT_SENTINEL_EXECUTABLE),
+                                           sentinel_timeout=kwargs.get("sentinel_timeout", DEFAULT_SENTINEL_TIMEOUT))
                 logger.cycle(cycle)
             return cycle
         finally:
@@ -6059,7 +6217,9 @@ def run_worker_loop(state_dir: Path, poll_interval: float, max_backoff: float, *
         try:
             logger = WorkerLog(state_dir, sources)
             failures = 0
-            cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader)
+            cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader,
+                                       sentinel_executable=kwargs.get("sentinel_executable", DEFAULT_SENTINEL_EXECUTABLE),
+                                       sentinel_timeout=kwargs.get("sentinel_timeout", DEFAULT_SENTINEL_TIMEOUT))
             while True:
                 logger.cycle(cycle)
                 if cycle["status"] in {"READY_IDLE", "READY_ACTIVE"}:
@@ -6073,10 +6233,14 @@ def run_worker_loop(state_dir: Path, poll_interval: float, max_backoff: float, *
                 _atomic_json_write(worker_paths(state_dir)["state"], state)
                 if cancellation.event.wait(delay) or cancellation.event.is_set():
                     if cycle.get("errors") != ["WORKER_CANCELLED"]:
-                        cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader)
+                        cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader,
+                                                   sentinel_executable=kwargs.get("sentinel_executable", DEFAULT_SENTINEL_EXECUTABLE),
+                                                   sentinel_timeout=kwargs.get("sentinel_timeout", DEFAULT_SENTINEL_TIMEOUT))
                         logger.cycle(cycle)
                     break
-                cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader)
+                cycle = _safe_worker_cycle(state_dir, sources, cancellation, reader,
+                                           sentinel_executable=kwargs.get("sentinel_executable", DEFAULT_SENTINEL_EXECUTABLE),
+                                           sentinel_timeout=kwargs.get("sentinel_timeout", DEFAULT_SENTINEL_TIMEOUT))
             return 0
         finally:
             if reader is not None:
@@ -6258,6 +6422,10 @@ def main() -> None:
         worker_parser.add_argument("--tclk-store", dest="worker_tclk_store", type=Path, help="Normalized TCLK JSONL; omitted means disabled")
         worker_parser.add_argument("--bench-proof-store", type=Path, help="Explicit Router-local router-bench-proof/v1 JSONL originals; disabled when omitted")
         worker_parser.add_argument("--task-inbox", type=Path, help="Router-owned task JSONL; default <state-dir>/worker/tasks.jsonl")
+        worker_parser.add_argument("--sentinel-executable", type=Path, default=DEFAULT_SENTINEL_EXECUTABLE,
+                                   help="Explicit Sentinel venv Python executable; never resolved through PATH")
+        worker_parser.add_argument("--sentinel-timeout", type=float, default=DEFAULT_SENTINEL_TIMEOUT,
+                                   help="Finite positive per-task Sentinel timeout in seconds (default 5)")
     args = parser.parse_args()
     db_path = Path(args.db or DEFAULT_DB_PATH)
     validation_store = Path(args.validation_store or DEFAULT_VALIDATION_STORE)
@@ -6284,6 +6452,7 @@ def main() -> None:
                       task_inbox=args.task_inbox, max_snapshot_bytes=args.max_snapshot_bytes,
                       snapshot_timeout=args.snapshot_timeout, max_projection_memory=args.max_projection_memory,
                       activate_scout_v2=args.activate_scout_v2, activate_scout_lg2=args.activate_scout_lg2, bench_proof_store=args.bench_proof_store)
+        inputs.update(sentinel_executable=args.sentinel_executable, sentinel_timeout=args.sentinel_timeout)
         if args.worker_command == "once":
             cycle = worker_once(state_dir, **inputs)
             print(json.dumps(cycle, sort_keys=True))
