@@ -17,6 +17,19 @@ import projection_contract as contract
 VERSION = 'router-projection-summaries/1'
 
 
+def _materialization_metric(reader, name, count=0):
+    """Return a per-acquisition timer callback for aggregate diagnostics."""
+    import time
+    started = time.monotonic()
+    def finish():
+        metrics = reader.metadata.setdefault('routing_materialization_breakdown', {})
+        metrics[name] = metrics.get(name, 0.0) + time.monotonic() - started
+        if count:
+            counts = reader.metadata.setdefault('routing_materialization_counts', {})
+            counts[name] = counts.get(name, 0) + count
+    return finish
+
+
 class Profiles(Mapping):
     def __init__(self, path, check=lambda: None):
         self.path, self.check = Path(path), check
@@ -172,22 +185,39 @@ def build(conn, reader, extra_observations=(), extra_interactions=(), validated=
                 with reader.stage('capability_support_derivation'):
                     with reader.stage('duplicate_processing'):
                         cursor=conn.execute(query)
+                    observations_batch=[]; hits_batch=[]
+                    def flush_batches():
+                        if observations_batch:
+                            done=_materialization_metric(reader,'observation_sql_insert',len(observations_batch))
+                            db.executemany('INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?)',observations_batch)
+                            done(); observations_batch.clear()
+                        if hits_batch:
+                            done=_materialization_metric(reader,'hit_sql_insert',len(hits_batch))
+                            db.executemany('INSERT OR IGNORE INTO hits VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',hits_batch)
+                            done(); hits_batch.clear()
                     for ordinal,row in enumerate(cursor):
                         reader.check()
                         if not r.DID_RE.match(row['sender']): continue
+                        done=_materialization_metric(reader,'observation_decode',1)
                         if row['extra_payload'] is None:
                             obs=r._projection_observation(row)
                         else:
                             data=json.loads(row['extra_payload']);data['identity']=r.AgentIdentity(**data['identity']);obs=r.AgentObservation(**data)
+                        done()
+                        done=_materialization_metric(reader,'support_classification',1)
                         noise=r.is_template_or_noise(obs.text,row['duplicates'],obs.template_dids)
                         original=not noise and r.is_substantive(obs.text)
                         contradiction=bool(r.re.search(r'\b(not|no|never)\s+(solidity|smart contract|python|testing|technocore)\b',r.normalize_text(obs.text)))
-                        db.execute('INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?)',(obs.identity.did,ordinal,obs.room,obs.location_id,obs.timestamp,int(original),int(noise),int(r.is_promotional(obs.text)),int(contradiction)))
+                        observations_batch.append((obs.identity.did,ordinal,obs.room,obs.location_id,obs.timestamp,int(original),int(noise),int(r.is_promotional(obs.text)),int(contradiction)))
                         for d in r.semantic_decisions(obs,row['duplicates']):
                             if d.support_contribution=='NONE': continue
                             e=d.evidence; positive=d.support_contribution in {'LIMITED','STRONG'}
                             template=f'{obs.room}:{obs.generation}:{obs.template_hash or d.observation_id}'
-                            db.execute('INSERT OR IGNORE INTO hits VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',(obs.identity.did,d.capability_id,template,e.sequence_id,ordinal,r.provenance_quality_score(e.verification_status),int(positive),int(e.strong),int(e.usable and e.specificity>=.65),int(e.verification_status=='VERIFIED_OFFLINE'),e.evidence_type,json.dumps(asdict(e),separators=(',',':'))))
+                            hits_batch.append((obs.identity.did,d.capability_id,template,e.sequence_id,ordinal,r.provenance_quality_score(e.verification_status),int(positive),int(e.strong),int(e.usable and e.specificity>=.65),int(e.verification_status=='VERIFIED_OFFLINE'),e.evidence_type,json.dumps(asdict(e),separators=(',',':'))))
+                        done()
+                        if len(observations_batch)>=256:
+                            flush_batches()
+                    flush_batches()
                 with reader.stage('interaction_loading'):
                     supported=False
                     import itertools

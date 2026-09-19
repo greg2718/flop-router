@@ -617,7 +617,7 @@ def normalize_text(text: str) -> str:
     return _normalized_small(text) if len(text) <= 8192 else _normalize_text(text)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=4096)
 def _normalized_small(text: str) -> str:
     return _normalize_text(text)
 
@@ -1647,6 +1647,7 @@ def pattern_matches(text: str, pattern: str) -> bool:
     return bool(compiled.search(text)) if compiled is not None else True
 
 
+@lru_cache(maxsize=4096)
 def is_template_or_noise(text: str, duplicate_count: int = 1, template_dids: int = 1) -> bool:
     if duplicate_count > 1 or template_dids > 1:
         return True
@@ -1664,6 +1665,7 @@ def is_template_or_noise(text: str, duplicate_count: int = 1, template_dids: int
     return any(re.search(pattern, t) for pattern in noise_patterns)
 
 
+@lru_cache(maxsize=4096)
 def is_promotional(text: str) -> bool:
     t = normalize_text(text)
     if not any(term in t for term in ('airdrop','claim','snapshot','referral','promo','ready for','expert for hire','hire me')):
@@ -1671,6 +1673,7 @@ def is_promotional(text: str) -> bool:
     return bool(re.search(r"\b(airdrop|claim|snapshot|referral|promo|ready for \$flop|expert for hire|hire me)\b", t))
 
 
+@lru_cache(maxsize=4096)
 def is_substantive(text: str) -> bool:
     if len(text.split()) < 7:
         return False
@@ -1684,6 +1687,7 @@ def is_substantive(text: str) -> bool:
     return any(signal in t for signal in signals)
 
 
+@lru_cache(maxsize=4096)
 def evidence_type_for(text: str, *, duplicate_count: int = 1, template_dids: int = 1) -> str:
     t = normalize_text(text)
     if is_template_or_noise(text, duplicate_count=duplicate_count, template_dids=template_dids):
@@ -1966,7 +1970,7 @@ def capability_evidence_decisions(
     return decisions
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=4096)
 def _small_semantic_decisions(text, duplicate, template_shared, verification):
     """Content-only memo: provenance is attached afresh to every observation.
 
@@ -2035,6 +2039,7 @@ def semantic_decisions(obs, duplicate_count):
         evidence_id=obs.evidence_id)) for d in prepared if d.relevant]
 
 
+@lru_cache(maxsize=4096)
 def specificity_score(text: str) -> float:
     t = normalize_text(text)
     score = 0.0
