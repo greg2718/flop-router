@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -97,6 +98,26 @@ class SentinelWorkerIntegrationTests(unittest.TestCase):
                 router.screen_router_task_with_sentinel("task-1", task, executable)
         with self.assertRaisesRegex(router.SentinelScreeningError, "SENTINEL_UNAVAILABLE"):
             router.screen_router_task_with_sentinel("task-1", task, Path("/no/sentinel"))
+
+    def test_launchd_worker_cwd_under_flop_agents_regresses_to_r000_but_runtime_cwd_does_not(self):
+        """Sentinel's state guard rejects the live worker state directory.
+
+        This recreates launchd's relevant HOME/cwd relationship without using
+        the operator's actual identity directory.  The fixed Router boundary
+        must select its dedicated temp runtime directory instead.
+        """
+        task = "Debug an HTTP 400 response"
+        home = Path(self.tmp.name).resolve() / "home"; worker_cwd = home / ".flop_agents" / "router" / "worker"
+        worker_cwd.mkdir(parents=True)
+        with patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+            rejected = router.screen_router_task_with_sentinel("task-1", task, cwd=worker_cwd)
+            accepted = router.screen_router_task_with_sentinel("task-1", task)
+            runtime = router.sentinel_runtime_dir()
+        self.assertEqual(rejected["rule_id"], "R-000")
+        self.assertEqual(rejected["decision"], "QUARANTINE")
+        self.assertEqual(accepted["rule_id"], "R-110")
+        self.assertEqual(accepted["decision"], "WARN")
+        self.assertFalse(runtime.is_relative_to(home / ".flop_agents"))
 
     def test_wrong_contract_and_unknown_mapping_fail_closed_at_validation(self):
         task = "Debug an HTTP 400 response"

@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import threading
+import tempfile
 from contextlib import contextmanager, nullcontext
 import sqlite3
 import sys
@@ -5366,6 +5367,25 @@ def _validate_sentinel_verdict(verdict: object, task_id: str | None, task_text: 
     return {key: verdict[key] for key in required if key != "task_id"}
 
 
+def sentinel_runtime_dir() -> Path:
+    """A Sentinel-owned runtime cwd that cannot collide with Router identity state.
+
+    Sentinel intentionally rejects ``./.dev_state`` beneath ``~/.flop_agents``.
+    Router's worker state lives there, so it must never become Sentinel's cwd.
+    The Sentinel adapter only persists bounded fingerprints in this directory;
+    task text is not written by Router.
+    """
+    runtime = Path(tempfile.gettempdir()).resolve() / f"flop-router-sentinel-{os.getuid()}"
+    try:
+        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        runtime.chmod(0o700)
+    except OSError as exc:
+        raise SentinelScreeningError("SENTINEL_EXCEPTION") from exc
+    if not runtime.is_dir():
+        raise SentinelScreeningError("SENTINEL_EXCEPTION")
+    return runtime
+
+
 def screen_router_task_with_sentinel(task_id: str | None, task_text: str, executable: Path = DEFAULT_SENTINEL_EXECUTABLE,
                                       timeout: float = DEFAULT_SENTINEL_TIMEOUT, cwd: Path | None = None) -> dict[str, str]:
     """Run Sentinel's authoritative Router adapter in its own interpreter."""
@@ -5379,6 +5399,7 @@ def screen_router_task_with_sentinel(task_id: str | None, task_text: str, execut
         raise SentinelScreeningError("SENTINEL_TIMEOUT")
     envelope = {"schema": SENTINEL_INPUT_SCHEMA, "task_id": task_id, "task": task_text}
     environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    cwd = cwd or sentinel_runtime_dir()
     try:
         completed = subprocess.run(
             [str(executable), "-c", _SENTINEL_BRIDGE], input=json.dumps(envelope), text=True,
@@ -5957,7 +5978,7 @@ def run_worker_cycle(
             continue
         try:
             verdict = screen_router_task_with_sentinel(
-                item["task_id"], task_text, sentinel_executable, sentinel_timeout, paths["dir"],
+                item["task_id"], task_text, sentinel_executable, sentinel_timeout,
             )
             security_policy = _sentinel_security_policy(verdict)
             if verdict["decision"] in {"QUARANTINE", "REJECT"}:
