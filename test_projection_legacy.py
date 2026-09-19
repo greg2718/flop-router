@@ -157,6 +157,18 @@ def test_lg2_invalid_rows_fail_before_consumption(tmp_path,statement):
     with pytest.raises(ss.SnapshotError):read(root,tmp_path/'cache',consume=lambda db:pytest.fail('invalid source consumed'))
 
 
+def test_provenance_annotation_cache_checks_each_row(tmp_path):
+    root=clone(tmp_path)
+    def edit(db):
+        first,second=db.execute("SELECT projection_row_id,annotations_json FROM source_provenance WHERE entity_type='message' ORDER BY projection_row_id LIMIT 2").fetchall()
+        # Force a cache hit for the later row, then corrupt a field outside the
+        # cached annotation.  Per-row identity validation must still reject it.
+        db.execute("UPDATE source_provenance SET annotations_json=?,raw_record_id='bad' WHERE projection_row_id=?",(first[1],second[0]))
+    mutate(root,edit)
+    with pytest.raises(ss.SnapshotError,match='INVALID_MESSAGE_ID'):
+        read(root,tmp_path/'cache')
+
+
 def test_lg2_duplicate_report_key_rejected():
     with sqlite3.connect(':memory:') as db:
         db.executescript(lg.SQL)

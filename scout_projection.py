@@ -101,6 +101,23 @@ class ProjectionReader(SnapshotReader):
             self.metadata.setdefault('stage_peak_rss_bytes', {})[name] = rss_bytes()
             self.metadata.setdefault('stage_peak_rss_delta_bytes', {})[name] = max(0, rss_bytes()-before_rss)
 
+    @contextmanager
+    def schema_component(self, name, count_key=None):
+        """Measure a required validation component without changing its scope.
+
+        The values are deliberately aggregate-only: publication rows remain
+        untrusted and are not copied into worker status diagnostics.
+        """
+        before = time.monotonic()
+        counts = self.metadata.setdefault('schema_validation_object_counts', {})
+        if count_key is not None:
+            counts.setdefault(count_key, 0)
+        try:
+            yield
+        finally:
+            breakdown = self.metadata.setdefault('schema_validation_breakdown', {})
+            breakdown[name] = breakdown.get(name, 0.0) + time.monotonic() - before
+
     def cleanup(self, accepted_path=None, accepted_routing=None):
         for path in self.created.copy():
             derived = str(path) == accepted_routing
@@ -300,66 +317,129 @@ class ProjectionReader(SnapshotReader):
             if conn is not None: conn.close()
 
     def _schema(self, conn, m):
-        with closing(sqlite3.connect(':memory:')) as expected:
-            expected.executescript(SCHEMA_SQL + (lg.SQL if m['contract_revision']==lg.REVISION else ''))
-            query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
-            require([tuple(r) for r in conn.execute(query)] == [tuple(r) for r in expected.execute(query)], 'INVALID_DATABASE_SCHEMA')
-            if m['contract_revision']==lg.REVISION:
-                for table in sorted(lg.TABLES):
-                    for pragma in ('table_xinfo','foreign_key_list','index_list'):
-                        require([tuple(r) for r in conn.execute(f'PRAGMA {pragma}({table})')]==[tuple(r) for r in expected.execute(f'PRAGMA {pragma}({table})')],'INVALID_LG2_SCHEMA')
-        require(conn.execute('PRAGMA user_version').fetchone()[0] == 2, 'UNSUPPORTED_DATABASE_SCHEMA')
-        require(conn.execute('PRAGMA foreign_key_check').fetchone() is None, 'INVALID_FOREIGN_KEY')
-        rows=conn.execute('SELECT * FROM snapshot_meta').fetchall()
-        require(len(rows)==1 and dict(rows[0]) == dict(singleton=1,schema=c.SCHEMA,database_content_id=m['database_content_id'],content_created_at=m['content_created_at'],selection_policy_sha256=c.POLICY_SHA), 'INVALID_CONTENT_META')
-        require({t:conn.execute('SELECT count(*) FROM '+t).fetchone()[0] for t in (set(c.TABLES) | (lg.TABLES if m['contract_revision']==lg.REVISION else set()))} == m['row_counts'],'ROW_COUNT_MISMATCH')
-        for table,entity in [('messages','message'),('interactions','interaction')]:
-            require(not conn.execute(f'''SELECT 1 FROM {table} m LEFT JOIN source_provenance p ON p.entity_type=? AND p.projection_row_id=m.projection_row_id LEFT JOIN selection_membership s ON s.entity_type=? AND s.projection_row_id=m.projection_row_id WHERE p.projection_row_id IS NULL OR s.projection_row_id IS NULL LIMIT 1''',(entity,entity)).fetchone(),'MISSING_PROVENANCE_MEMBERSHIP')
-        for table in ('source_provenance','selection_membership'):
-            require(not conn.execute(f'''SELECT 1 FROM {table} p LEFT JOIN messages m ON p.entity_type='message' AND m.projection_row_id=p.projection_row_id LEFT JOIN interactions i ON p.entity_type='interaction' AND i.projection_row_id=p.projection_row_id WHERE m.projection_row_id IS NULL AND i.projection_row_id IS NULL LIMIT 1''').fetchone(),'ORPHAN_PROVENANCE')
-        # json_array preserves NULL distinctions, unlike count(DISTINCT column).
-        require(not conn.execute('''SELECT 1 FROM messages GROUP BY room,generation,seq HAVING count(DISTINCT json_array(sender,text,timestamp,nonce,sig))>1 LIMIT 1''').fetchone(),'CONFLICTING_SOURCE_POSITION')
+        with self.schema_component('table_schema_metadata_validation'):
+            with closing(sqlite3.connect(':memory:')) as expected:
+                expected.executescript(SCHEMA_SQL + (lg.SQL if m['contract_revision']==lg.REVISION else ''))
+                query="SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+                require([tuple(r) for r in conn.execute(query)] == [tuple(r) for r in expected.execute(query)], 'INVALID_DATABASE_SCHEMA')
+                if m['contract_revision']==lg.REVISION:
+                    for table in sorted(lg.TABLES):
+                        for pragma in ('table_xinfo','foreign_key_list','index_list'):
+                            require([tuple(r) for r in conn.execute(f'PRAGMA {pragma}({table})')]==[tuple(r) for r in expected.execute(f'PRAGMA {pragma}({table})')],'INVALID_LG2_SCHEMA')
+            require(conn.execute('PRAGMA user_version').fetchone()[0] == 2, 'UNSUPPORTED_DATABASE_SCHEMA')
+            require(conn.execute('PRAGMA foreign_key_check').fetchone() is None, 'INVALID_FOREIGN_KEY')
+        with self.schema_component('snapshot_meta_validation', 'snapshot_meta'):
+            rows=conn.execute('SELECT * FROM snapshot_meta').fetchall()
+            self.metadata['schema_validation_object_counts']['snapshot_meta'] = len(rows)
+            require(len(rows)==1 and dict(rows[0]) == dict(singleton=1,schema=c.SCHEMA,database_content_id=m['database_content_id'],content_created_at=m['content_created_at'],selection_policy_sha256=c.POLICY_SHA), 'INVALID_CONTENT_META')
+        with self.schema_component('row_count_validation'):
+            counts={t:conn.execute('SELECT count(*) FROM '+t).fetchone()[0] for t in (set(c.TABLES) | (lg.TABLES if m['contract_revision']==lg.REVISION else set()))}
+            self.metadata['schema_validation_object_counts'].update(counts)
+            require(counts == m['row_counts'],'ROW_COUNT_MISMATCH')
+        with self.schema_component('cross_reference_validation'):
+            for table,entity in [('messages','message'),('interactions','interaction')]:
+                require(not conn.execute(f'''SELECT 1 FROM {table} m LEFT JOIN source_provenance p ON p.entity_type=? AND p.projection_row_id=m.projection_row_id LEFT JOIN selection_membership s ON s.entity_type=? AND s.projection_row_id=m.projection_row_id WHERE p.projection_row_id IS NULL OR s.projection_row_id IS NULL LIMIT 1''',(entity,entity)).fetchone(),'MISSING_PROVENANCE_MEMBERSHIP')
+            for table in ('source_provenance','selection_membership'):
+                require(not conn.execute(f'''SELECT 1 FROM {table} p LEFT JOIN messages m ON p.entity_type='message' AND m.projection_row_id=p.projection_row_id LEFT JOIN interactions i ON p.entity_type='interaction' AND i.projection_row_id=p.projection_row_id WHERE m.projection_row_id IS NULL AND i.projection_row_id IS NULL LIMIT 1''').fetchone(),'ORPHAN_PROVENANCE')
+            # json_array preserves NULL distinctions, unlike count(DISTINCT column).
+            require(not conn.execute('''SELECT 1 FROM messages GROUP BY room,generation,seq HAVING count(DISTINCT json_array(sender,text,timestamp,nonce,sig))>1 LIMIT 1''').fetchone(),'CONFLICTING_SOURCE_POSITION')
 
     def _rows(self, conn, m):
         evidence_hash=hashlib.sha256()
+        @lru_cache(maxsize=4096)
+        def text_hash(text):
+            before=time.monotonic()
+            try: return c.text_hash(text)
+            finally: self.metadata.setdefault('schema_validation_breakdown',{}).setdefault('json_parse_canonicalization',0.0); self.metadata['schema_validation_breakdown']['json_parse_canonicalization']+=time.monotonic()-before
+        @lru_cache(maxsize=4096)
+        def annotation(raw):
+            metrics=self.metadata.setdefault('source_provenance_profile', {})
+            before=time.monotonic()
+            try:
+                parsed=c.loads(raw,65536)
+            finally:
+                metrics['json_parse_seconds']=metrics.get('json_parse_seconds',0.0)+time.monotonic()-before
+                metrics['json_parse_calls']=metrics.get('json_parse_calls',0)+1
+            before=time.monotonic()
+            try: return c.annotations(parsed)
+            finally:
+                elapsed=time.monotonic()-before
+                metrics['annotation_contract_seconds']=metrics.get('annotation_contract_seconds',0.0)+elapsed
+                metrics['annotation_contract_calls']=metrics.get('annotation_contract_calls',0)+1
+                self.metadata.setdefault('schema_validation_breakdown',{}).setdefault('json_parse_canonicalization',0.0); self.metadata['schema_validation_breakdown']['json_parse_canonicalization']+=elapsed
         for table in ('messages','interactions'):
             began=time.monotonic(); visited=0
-            for row in conn.execute('SELECT * FROM '+table+' ORDER BY projection_row_id'):
-                self.check(); visited+=1; obj=dict(row); c.string(row['projection_row_id'])
-                if table=='messages':
-                    for k in ('room','generation','sender'): c.string(row[k])
-                    require(type(row['seq']) is int and row['seq']>=0 and type(row['signed']) is int and row['signed'] in (0,1))
-                    require(type(row['text']) is str)
-                    for k in ('timestamp','normalized_text','nonce','sig','source_export_path','evidence_id','verification_status'):
-                        require(row[k] is None or type(row[k]) is str)
-                    for k in ('message_hash','template_normalized_hash','source_export_hash'): c.sha(row[k],True)
-                    require(row['message_hash'] is None or row['message_hash']==c.text_hash(row['text']), 'MESSAGE_HASH_MISMATCH')
-                    obj.pop('source_export_path'); obj.pop('source_export_hash')
-                else:
-                    for k in ('source_did','target_did','relationship_type'): c.string(row[k])
-                    require(type(row['confidence']) in (float,int) and math.isfinite(row['confidence']))
-                evidence_hash.update(c.canonical([table,obj])+b'\n')
+            component='message_row_validation' if table=='messages' else 'interaction_row_validation'
+            with self.schema_component(component,table):
+                for row in conn.execute('SELECT * FROM '+table+' ORDER BY projection_row_id'):
+                    self.check(); visited+=1; obj=dict(row); c.string(row['projection_row_id'])
+                    if table=='messages':
+                        for k in ('room','generation','sender'): c.string(row[k])
+                        require(type(row['seq']) is int and row['seq']>=0 and type(row['signed']) is int and row['signed'] in (0,1))
+                        require(type(row['text']) is str)
+                        for k in ('timestamp','normalized_text','nonce','sig','source_export_path','evidence_id','verification_status'):
+                            require(row[k] is None or type(row[k]) is str)
+                        for k in ('message_hash','template_normalized_hash','source_export_hash'): c.sha(row[k],True)
+                        require(row['message_hash'] is None or row['message_hash']==text_hash(row['text']), 'MESSAGE_HASH_MISMATCH')
+                        obj.pop('source_export_path'); obj.pop('source_export_hash')
+                    else:
+                        for k in ('source_did','target_did','relationship_type'): c.string(row[k])
+                        require(type(row['confidence']) in (float,int) and math.isfinite(row['confidence']))
+                    before=time.monotonic(); evidence_hash.update(c.canonical([table,obj])+b'\n'); self.metadata.setdefault('schema_validation_breakdown',{}).setdefault('json_parse_canonicalization',0.0); self.metadata['schema_validation_breakdown']['json_parse_canonicalization']+=time.monotonic()-before
+            self.metadata['schema_validation_object_counts'][table]=visited
             self.metadata.setdefault('rows_read',{})[table]=visited
             self.metadata['stage_seconds'][table+'_loading']=time.monotonic()-began
             self.metadata.setdefault('stage_peak_rss_bytes',{})[table+'_loading']=rss_bytes()
         began=time.monotonic();visited=0
-        for row in conn.execute("SELECT p.*,m.sender AS message_sender FROM source_provenance p LEFT JOIN messages m ON p.entity_type='message' AND m.projection_row_id=p.projection_row_id ORDER BY p.entity_type,p.projection_row_id"):
-            self.check();visited+=1
-            for k in ('projection_row_id','source_namespace','source_record_locator'): c.string(row[k])
-            c.string(row['raw_record_id'],True); c.sha(row['raw_record_sha256'],True)
-            if row['scout_event_id'] is not None: c.decimal(row['scout_event_id'])
-            a=c.annotations(c.loads(row['annotations_json'],65536))
-            if row['entity_type']=='message':
-                require(row['raw_record_id'] is not None and row['projection_row_id']=='sm1:'+row['raw_record_id'],'INVALID_MESSAGE_ID')
-                family(a,row['message_sender'])
-            else: family(a)
-            obj=dict(row); obj.pop('message_sender'); obj['annotations_json']=a
-            evidence_hash.update(c.canonical(['provenance',obj])+b'\n')
+        provenance_profile=self.metadata.setdefault('source_provenance_profile', {})
+        provenance_profile.update(sql_query_count=0, row_fetch_count=0, row_field_validation_calls=0,
+                                 message_relationship_checks=0, provenance_canonicalization_calls=0,
+                                 raw_hash_field_checks=0, source_locator_field_checks=0)
+        with self.schema_component('source_provenance_validation','source_provenance'):
+            before=time.monotonic()
+            cursor=conn.execute("SELECT p.*,m.sender AS message_sender FROM source_provenance p LEFT JOIN messages m ON p.entity_type='message' AND m.projection_row_id=p.projection_row_id ORDER BY p.entity_type,p.projection_row_id")
+            provenance_profile['sql_query_count']=1
+            provenance_profile['sql_execute_seconds']=time.monotonic()-before
+            iterator=iter(cursor)
+            while True:
+                before=time.monotonic()
+                try: row=next(iterator)
+                except StopIteration: break
+                provenance_profile['row_fetch_seconds']=provenance_profile.get('row_fetch_seconds',0.0)+time.monotonic()-before
+                provenance_profile['row_fetch_count']+=1
+                self.check();visited+=1
+                before=time.monotonic()
+                for k in ('projection_row_id','source_namespace','source_record_locator'): c.string(row[k])
+                c.string(row['raw_record_id'],True); c.sha(row['raw_record_sha256'],True)
+                provenance_profile['source_locator_field_checks']+=3
+                provenance_profile['raw_hash_field_checks']+=1
+                if row['scout_event_id'] is not None: c.decimal(row['scout_event_id'])
+                provenance_profile['row_field_validation_calls']+=1
+                provenance_profile['row_field_validation_seconds']=provenance_profile.get('row_field_validation_seconds',0.0)+time.monotonic()-before
+                provenance_profile['annotation_calls']=provenance_profile.get('annotation_calls',0)+1
+                a=annotation(row['annotations_json'])
+                before=time.monotonic()
+                if row['entity_type']=='message':
+                    require(row['raw_record_id'] is not None and row['projection_row_id']=='sm1:'+row['raw_record_id'],'INVALID_MESSAGE_ID')
+                    family(a,row['message_sender'])
+                else: family(a)
+                provenance_profile['message_relationship_checks']+=1
+                provenance_profile['message_relationship_seconds']=provenance_profile.get('message_relationship_seconds',0.0)+time.monotonic()-before
+                obj=dict(row); obj.pop('message_sender'); obj['annotations_json']=a
+                before=time.monotonic(); evidence_hash.update(c.canonical(['provenance',obj])+b'\n'); elapsed=time.monotonic()-before
+                provenance_profile['provenance_canonicalization_calls']+=1
+                provenance_profile['provenance_canonicalization_seconds']=provenance_profile.get('provenance_canonicalization_seconds',0.0)+elapsed
+                self.metadata.setdefault('schema_validation_breakdown',{}).setdefault('json_parse_canonicalization',0.0); self.metadata['schema_validation_breakdown']['json_parse_canonicalization']+=elapsed
+        info=annotation.cache_info()
+        provenance_profile.update(annotation_cache_hits=info.hits,annotation_cache_misses=info.misses,
+                                  annotation_cache_maxsize=info.maxsize, annotation_cache_size=info.currsize)
+        self.metadata['schema_validation_object_counts']['source_provenance']=visited
         self.metadata.setdefault('rows_read',{})['source_provenance']=visited
         self.metadata['stage_seconds']['source_provenance_loading']=time.monotonic()-began
         self.metadata.setdefault('stage_peak_rss_bytes',{})['source_provenance_loading']=rss_bytes()
         began=time.monotonic();visited=0
-        for row in conn.execute('SELECT * FROM selection_membership ORDER BY entity_type,projection_row_id'):
+        with self.schema_component('selection_membership_validation','selection_membership'):
+         for row in conn.execute('SELECT * FROM selection_membership ORDER BY entity_type,projection_row_id'):
             self.check(); visited+=1; require(row['retention_class'] in c.CLASSES)
             first=c.instant(row['first_observed_at']); pins=c.loads(row['pin_roots_json'],65536); c.roots(pins)
             require(first <= c.instant(m['selection_evaluated_at']), 'FUTURE_MEMBERSHIP')
@@ -369,31 +449,37 @@ class ProjectionReader(SnapshotReader):
                 if row['retention_class'] in {'CONTEXT','CAPABILITY_SIGNAL'}:
                     seconds=c.POLICY['parameters']['context_seconds' if row['retention_class']=='CONTEXT' else 'capability_signal_seconds']
                     require(c.instant(row['retain_until'])-first == __import__('datetime').timedelta(seconds=seconds),'INVALID_HORIZON')
+        self.metadata['schema_validation_object_counts']['selection_membership']=visited
         self.metadata.setdefault('rows_read',{})['selection_membership']=visited
         self.metadata['stage_seconds']['membership_loading']=time.monotonic()-began
         self.metadata.setdefault('stage_peak_rss_bytes',{})['membership_loading']=rss_bytes()
         self.metadata['routing_input_hash']=evidence_hash.hexdigest()
 
     def _coverage(self,conn,m,previous):
-        for table,fields in [('watermarks','room,generation,count(*) AS record_count,min(seq) AS min_seq,max(seq) AS max_seq')]:
-            actual=[dict(r) for r in conn.execute('SELECT * FROM '+table+' ORDER BY room,generation')]
-            derived=[dict(r) for r in conn.execute('SELECT '+fields+' FROM messages GROUP BY room,generation ORDER BY room,generation')]
-            require(actual==derived==m['watermarks'],'DATABASE_WATERMARK_MISMATCH')
-        history=[dict(r) for r in conn.execute('SELECT * FROM coverage_history ORDER BY room,generation')]
-        require(history==m['coverage_history'],'HISTORY_MISMATCH')
-        by={(r['room'],r['generation']):r for r in history}
-        old={(r['room'],r['generation']):r for r in (previous or {}).get('coverage_history',[])}
-        for domain,p in old.items():
-            require(domain in by and by[domain]['max_ever_projected_seq']>=p['max_ever_projected_seq'],'CONTINUITY_COVERAGE_REGRESSION')
-            if by[domain]['max_ever_projected_seq']==p['max_ever_projected_seq']: require(by[domain]==p,'CONTINUITY_WITNESS_CONFLICT')
-        for w in m['watermarks']:
-            require((w['room'],w['generation']) in by and by[w['room'],w['generation']]['max_ever_projected_seq']>=w['max_seq'],'HISTORY_BELOW_CURRENT')
-        for domain,w in by.items():
-            self.check()
-            if domain in old and old[domain]==w: continue
-            rows=conn.execute('''SELECT m.* FROM messages m JOIN source_provenance p ON p.entity_type='message' AND p.projection_row_id=m.projection_row_id WHERE m.room=? AND m.generation=? AND m.seq=? AND p.source_record_locator=?''',(*domain,w['max_ever_projected_seq'],w['witness_source_locator']))
-            require(any(c.digest(dict(r))==w['witness_record_sha256'] for r in rows),'INVALID_COVERAGE_WITNESS')
-        require(conn.execute('SELECT min(retain_until) FROM selection_membership').fetchone()[0]==m['next_expiry_at'],'NEXT_EXPIRY_MISMATCH')
+        with self.schema_component('watermarks_validation','watermarks'):
+            for table,fields in [('watermarks','room,generation,count(*) AS record_count,min(seq) AS min_seq,max(seq) AS max_seq')]:
+                actual=[dict(r) for r in conn.execute('SELECT * FROM '+table+' ORDER BY room,generation')]
+                derived=[dict(r) for r in conn.execute('SELECT '+fields+' FROM messages GROUP BY room,generation ORDER BY room,generation')]
+                self.metadata['schema_validation_object_counts']['watermarks']=len(actual)
+                require(actual==derived==m['watermarks'],'DATABASE_WATERMARK_MISMATCH')
+        with self.schema_component('coverage_history_validation','coverage_history'):
+            history=[dict(r) for r in conn.execute('SELECT * FROM coverage_history ORDER BY room,generation')]
+            self.metadata['schema_validation_object_counts']['coverage_history']=len(history)
+            require(history==m['coverage_history'],'HISTORY_MISMATCH')
+        with self.schema_component('coverage_cross_reference_validation'):
+            by={(r['room'],r['generation']):r for r in history}
+            old={(r['room'],r['generation']):r for r in (previous or {}).get('coverage_history',[])}
+            for domain,p in old.items():
+                require(domain in by and by[domain]['max_ever_projected_seq']>=p['max_ever_projected_seq'],'CONTINUITY_COVERAGE_REGRESSION')
+                if by[domain]['max_ever_projected_seq']==p['max_ever_projected_seq']: require(by[domain]==p,'CONTINUITY_WITNESS_CONFLICT')
+            for w in m['watermarks']:
+                require((w['room'],w['generation']) in by and by[w['room'],w['generation']]['max_ever_projected_seq']>=w['max_seq'],'HISTORY_BELOW_CURRENT')
+            for domain,w in by.items():
+                self.check()
+                if domain in old and old[domain]==w: continue
+                rows=conn.execute('''SELECT m.* FROM messages m JOIN source_provenance p ON p.entity_type='message' AND m.projection_row_id=p.projection_row_id WHERE m.room=? AND m.generation=? AND m.seq=? AND p.source_record_locator=?''',(*domain,w['max_ever_projected_seq'],w['witness_source_locator']))
+                require(any(c.digest(dict(r))==w['witness_record_sha256'] for r in rows),'INVALID_COVERAGE_WITNESS')
+            require(conn.execute('SELECT min(retain_until) FROM selection_membership').fetchone()[0]==m['next_expiry_at'],'NEXT_EXPIRY_MISMATCH')
 
     def _proof(self,conn,ref,m):
         c.reference(ref,{'PROJECTED_MESSAGE','LOCAL_ARTIFACT'})
@@ -577,7 +663,8 @@ class ProjectionReader(SnapshotReader):
                                 return 0
                             scratch.set_progress_handler(progress,1000)
                             try:
-                                with self.stage('qualification_loading'): self._qualifications(conn,m,scratch)
+                                with self.stage('qualification_loading'), self.schema_component('durable_qualifications_validation', 'durable_qualifications'):
+                                    self._qualifications(conn,m,scratch)
                                 with self.stage('workflow_reconstruction'): self._workflows(conn,scratch,m)
                             except sqlite3.Error:
                                 if interrupted: raise interrupted[0]
