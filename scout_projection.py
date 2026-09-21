@@ -4,6 +4,7 @@ The producer is a trusted same-user source, not an independent attestor. Local
 proof references stay opaque: they never authorize opening arbitrary paths.
 """
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
@@ -40,6 +41,48 @@ def rss_bytes():
 def require(ok, code='INVALID_PROJECTION'):
     if not ok:
         raise SnapshotError(code)
+
+
+@dataclass(frozen=True)
+class VerifiedEpochBridge:
+    """Router-local, live-only bridge capability; never wire-serializable."""
+    _session: object
+    _token: object
+    candidate_transition_sha256: str
+    accepted_anchor: dict
+    bridge_predecessor: dict
+    bridge_binding: str
+    verified_bridge_commitment: str
+    source_checkpoint: dict
+    watermarks_commitment: str
+    history_commitment: str
+    audit_commitment: str
+
+    def __repr__(self):
+        return '<VerifiedEpochBridge active=%s>' % self._session.active
+
+    def __reduce__(self):
+        raise TypeError('VerifiedEpochBridge is session-local and non-serializable')
+
+
+class EpochValidationSession:
+    """Owns ephemeral bridge staging and invalidates all receipts on close."""
+    def __init__(self, reader):
+        self.reader = reader
+        self.token = object()
+        self.active = False
+        self._temporary = None
+
+    def __enter__(self):
+        self._temporary = tempfile.TemporaryDirectory(prefix='.epoch-v2-', dir=self.reader.cache_dir)
+        os.chmod(self._temporary.name, 0o700)
+        self.active = True
+        return self
+
+    def __exit__(self, *_):
+        self.active = False
+        self._temporary.cleanup()
+        self._temporary = None
 
 
 def family(value, did=None):
@@ -195,7 +238,7 @@ class ProjectionReader(SnapshotReader):
             self.verified_files[(str(path),digest)] = stamp
         finally: os.close(fd)
 
-    def _manifest(self, pointer, raw, previous, max_age, now):
+    def _manifest(self, pointer, raw, previous, max_age, now, enforce_freshness=True):
         digest = hashlib.sha256(raw).hexdigest()
         require(digest == pointer['manifest_sha256'], 'MANIFEST_HASH_MISMATCH')
         m = c.loads(raw, MAX_MANIFEST_BYTES)
@@ -233,7 +276,7 @@ class ProjectionReader(SnapshotReader):
         pub = utc_timestamp(pointer['published_at'])
         require(t['content_created_at'] <= t['selection_evaluated_at'] == t['produced_at'] <= pub and (pub-now).total_seconds() <= 60, 'INVALID_PUBLICATION_TIME')
         age = (now-t['produced_at']).total_seconds()
-        if age > max_age: raise SnapshotError('SNAPSHOT_STALE','DEGRADED_INPUT_STALE')
+        if enforce_freshness and age > max_age: raise SnapshotError('SNAPSHOT_STALE','DEGRADED_INPUT_STALE')
         if m['next_expiry_at'] is not None:
             require(utc_timestamp(m['next_expiry_at']) > t['selection_evaluated_at'], 'DUE_EXPIRY')
         c.keys(m['source_checkpoint'], {'source_id','epoch','committed_event_id'})
@@ -624,7 +667,7 @@ class ProjectionReader(SnapshotReader):
             verifier.verify(row,m['selection_evaluated_at'])
         self.metadata['workflow_closures_validated']=True
 
-    def read(self,consume,previous=None,max_age=3600.,now=None):
+    def read(self,consume,previous=None,max_age=3600.,now=None,*,allow_stale=False,retain_candidate=True):
         if not math.isfinite(max_age) or max_age<=0: raise ValueError('positive max age required')
         start=time.monotonic(); self.deadline=start+self.timeout
         self.metadata={'root_path':str(self.root),'current_pointer_status':'NOT_CHECKED','stage_seconds':{},'readiness':'INVALID','readiness_phase':'ACQUIRING','max_snapshot_bytes':self.max_bytes,'max_memory_bytes':self.max_memory,'deadline_seconds':self.timeout}
@@ -635,7 +678,7 @@ class ProjectionReader(SnapshotReader):
                 _basename(pointer['manifest_sha256'],HASH); _basename(pointer['manifest'],rf'manifest-v2-{SNAPSHOT_ID}-{HASH}\.json')
                 self.metadata['current_pointer_status']='VALID'
             with self.stage('manifest_read'):
-                m=self._manifest(pointer,self._read_json_file(pointer['manifest'],MAX_MANIFEST_BYTES),previous,max_age,now or datetime.now(timezone.utc))
+                m=self._manifest(pointer,self._read_json_file(pointer['manifest'],MAX_MANIFEST_BYTES),previous,max_age,now or datetime.now(timezone.utc),not allow_stale)
             old_path=None
             if previous:
                 with self.stage('prior_copy_verification'):
@@ -696,14 +739,14 @@ class ProjectionReader(SnapshotReader):
                     with self.stage('evidence_materialization'): result=consume(conn)
                 self.check()
                 final=self.cache_dir/(m['sha256']+'.sqlite')
-                if not reused:
+                if not reused and retain_candidate:
                     os.replace(candidate,final); self.created.add(final)
                     fd=os.open(self.cache_dir,os.O_RDONLY|os.O_DIRECTORY)
                     try: os.fsync(fd)
                     finally: os.close(fd)
                 self.metadata['validated_content'] = dict(version=VALIDATOR_VERSION,content_binding=lg.binding(m),legacy_generation_audit=self.metadata.get('legacy_generation_audit'),database_hash=m['sha256'],routing_input_hash=self.metadata['routing_input_hash'],qualification_history=self.metadata['qualification_history'])
                 self.metadata['validated_content']['checksum'] = c.digest(self.metadata['validated_content'])
-                self.metadata.update(cache_path=str(final),reused_database=reused,readiness='WARNING_LARGE' if m['size_bytes']>=1024**3 else 'READY')
+                self.metadata.update(cache_path=str(final) if retain_candidate or reused else None,reused_database=reused,readiness='WARNING_LARGE' if m['size_bytes']>=1024**3 else 'READY')
                 self.metadata.update(total_acquisition_seconds=time.monotonic()-start, peak_rss_bytes=rss_bytes())
                 return result,dict(self.metadata)
         except (c.ProjectionError, ValueError, TypeError, KeyError, RecursionError):
@@ -720,6 +763,52 @@ class ProjectionReader(SnapshotReader):
             self.metadata['peak_rss_bytes']=rss_bytes()
             if self.metadata.get('readiness') not in {'READY','WARNING_LARGE'}:
                 self.cleanup((previous or {}).get('cache_path'),(previous or {}).get('routing_cache',{}).get('path'))
+
+    def epoch_validation_session(self):
+        if not self.enable_epoch_v2:
+            raise SnapshotError('EPOCH_V2_DISABLED')
+        self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return EpochValidationSession(self)
+
+    @staticmethod
+    def _epoch_descriptor(manifest, manifest_hash):
+        return {'publication_id':int(manifest['snapshot_id']),'content_id':int(manifest['database_content_id']),
+                'manifest_sha256':manifest_hash,'artifact_sha256':manifest['sha256'],
+                'artifact_size_bytes':manifest['size_bytes'],'source_checkpoint':dict(manifest['source_checkpoint']),
+                'watermarks':[dict(x) for x in manifest['watermarks']],
+                'coverage_history':[dict(x) for x in manifest['coverage_history']]}
+
+    def validate_epoch_bridge(self, session, bridge_root, previous, candidate_transition_sha256, *, now=None):
+        """Full A1 validation without profiles, accepted-state writes, or cache promotion."""
+        if not isinstance(session, EpochValidationSession) or session.reader is not self or not session.active:
+            raise SnapshotError('EPOCH_SESSION_INVALID')
+        c.sha(candidate_transition_sha256)
+        bridge = ProjectionReader(bridge_root, self.cache_dir, self.check_cancel, self.timeout,
+                                  self.max_bytes, self.max_memory, self.activate_lg2)
+        try:
+            _none, metadata = bridge.read(lambda _conn: None, previous=previous, max_age=3600., now=now,
+                                          allow_stale=True, retain_candidate=False)
+        finally:
+            bridge.close()
+        anchor=self._epoch_descriptor(previous['manifest'],previous['manifest_hash'])
+        candidate=self._epoch_descriptor(metadata['manifest'],metadata['manifest_hash'])
+        binding=epoch_v2.commitment('a1-bridge-binding',{'accepted_anchor':anchor,'bridge_predecessor':candidate})
+        watermarks=epoch_v2.commitment('bridge-watermarks',candidate['watermarks'])
+        history=epoch_v2.commitment('bridge-history',candidate['coverage_history'])
+        audit=epoch_v2.commitment('bridge-audit',{'qualifications':metadata['qualification_history'],'workflow_closures_validated':metadata.get('workflow_closures_validated')})
+        verified=epoch_v2.commitment('verified-a1-bridge',{'candidate_transition_sha256':candidate_transition_sha256,'accepted_anchor':anchor,'bridge_predecessor':candidate,'bridge_binding':binding,'watermarks_commitment':watermarks,'history_commitment':history,'audit_commitment':audit})
+        self.metadata['epoch_bridge_stage_seconds'] = dict(metadata.get('stage_seconds', {}))
+        self.metadata['epoch_bridge_peak_rss_bytes'] = metadata.get('peak_rss_bytes')
+        return VerifiedEpochBridge(session,session.token,candidate_transition_sha256,anchor,candidate,binding,verified,dict(candidate['source_checkpoint']),watermarks,history,audit)
+
+    @staticmethod
+    def require_verified_epoch_bridge(session, receipt, candidate_transition_sha256, accepted_anchor, bridge_predecessor, bridge_binding):
+        if (not isinstance(receipt, VerifiedEpochBridge) or not session.active or receipt._session is not session
+                or receipt._token is not session.token or receipt.candidate_transition_sha256 != candidate_transition_sha256
+                or receipt.accepted_anchor != accepted_anchor or receipt.bridge_predecessor != bridge_predecessor
+                or receipt.bridge_binding != bridge_binding):
+            raise SnapshotError('EPOCH_BRIDGE_RECEIPT_INVALID')
+        return receipt
 
 
 def qualification_history(conn, subject_did=None):

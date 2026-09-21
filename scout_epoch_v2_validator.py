@@ -7,7 +7,7 @@ SCHEMA = 'flop-scout-router-epoch-rollover/v2'
 REVISION = 'A1-EPOCH-V2'
 MAX_INPUT_BYTES, MAX_DEPTH, MAX_STRING_BYTES = 65536, 16, 4096
 MAX_LIST_ITEMS, MAX_MAP_ITEMS, MAX_EPOCH, MAX_INT = 256, 64, 9007199254740991, 9223372036854775807
-DOMAINS = frozenset(('predecessor', 'archive-descriptor', 'retained-floor-declaration', 'mandatory-closure', 'durable-qualification-history', 'coverage-witnesses', 'permanent-pinned-evidence', 'omitted-history', 'complete-transition'))
+DOMAINS = frozenset(('predecessor', 'archive-descriptor', 'retained-floor-declaration', 'mandatory-closure', 'durable-qualification-history', 'coverage-witnesses', 'permanent-pinned-evidence', 'omitted-history', 'complete-transition', 'a1-bridge-binding', 'bridge-watermarks', 'bridge-history', 'bridge-audit', 'verified-a1-bridge'))
 HEX = re.compile(r'^[0-9a-f]{64}$'); IDENTIFIER = re.compile(r'^[a-z][a-z0-9:._-]{0,128}$')
 TIME = re.compile(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$')
 
