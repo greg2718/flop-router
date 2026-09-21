@@ -111,7 +111,8 @@ class ProjectionReader(SnapshotReader):
     def __init__(self, root, cache_dir, check_cancel=lambda: None, timeout=30.0,
                  max_bytes=MAX_BYTES, max_memory=MAX_MEMORY, activate_lg2=False,
                  enable_epoch_v2=False, epoch_v2_predecessor=None,
-                 epoch_v2_first_transition=False):
+                 epoch_v2_first_transition=False,
+                 epoch_v2_accepted_epoch_number=0, epoch_v2_bridge_root=None):
         super().__init__(root, check_cancel, timeout)
         if not math.isfinite(timeout) or timeout <= 0 or type(max_bytes) is not int or not 0 < max_bytes <= MAX_BYTES:
             raise ValueError('positive timeout and byte ceiling <=4 GiB required')
@@ -126,6 +127,8 @@ class ProjectionReader(SnapshotReader):
         self.enable_epoch_v2 = enable_epoch_v2
         self.epoch_v2_predecessor = epoch_v2_predecessor
         self.epoch_v2_first_transition = epoch_v2_first_transition
+        self.epoch_v2_accepted_epoch_number = epoch_v2_accepted_epoch_number
+        self.epoch_v2_bridge_root = Path(epoch_v2_bridge_root).resolve() if epoch_v2_bridge_root else None
         self.archived_paths = set()
         self.verified_files = {}
 
@@ -247,8 +250,7 @@ class ProjectionReader(SnapshotReader):
             if not self.enable_epoch_v2:
                 raise SnapshotError('EPOCH_V2_DISABLED')
             try:
-                epoch_v2.validate_transition(m.get('epoch_rollover'), self.epoch_v2_predecessor,
-                                             self.epoch_v2_first_transition)
+                self._validate_epoch_v2_disabled(m.get('epoch_rollover'), previous, now)
             except epoch_v2.EpochV2Error as exc:
                 raise SnapshotError(exc.code) from None
             # Slice 2 is deliberately validate-only: do not open an archive,
@@ -772,13 +774,41 @@ class ProjectionReader(SnapshotReader):
 
     @staticmethod
     def _epoch_descriptor(manifest, manifest_hash):
-        return {'publication_id':int(manifest['snapshot_id']),'content_id':int(manifest['database_content_id']),
+        checkpoint=manifest['source_checkpoint']
+        return {'publication_sequence':int(manifest['snapshot_id']),
+                'content_id':int(manifest['database_content_id']),
                 'manifest_sha256':manifest_hash,'artifact_sha256':manifest['sha256'],
-                'artifact_size_bytes':manifest['size_bytes'],'source_checkpoint':dict(manifest['source_checkpoint']),
-                'watermarks':[dict(x) for x in manifest['watermarks']],
-                'coverage_history':[dict(x) for x in manifest['coverage_history']]}
+                'artifact_size':manifest['size_bytes'],'source_kind':checkpoint['epoch'],
+                'source_id':checkpoint['source_id'],
+                'source_cut':int(checkpoint['committed_event_id'])}
 
-    def validate_epoch_bridge(self, session, bridge_root, previous, candidate_transition_sha256, *, now=None):
+    def _accepted_epoch_anchor(self, previous):
+        """Derive the V2 anchor solely from Router's accepted continuity state."""
+        if isinstance(previous, dict) and isinstance(previous.get('manifest'), dict) and isinstance(previous.get('manifest_hash'), str):
+            return self._epoch_descriptor(previous['manifest'], previous['manifest_hash'])
+        raise SnapshotError('EPOCH_ACCEPTED_ANCHOR')
+
+    def _validate_epoch_v2_disabled(self, transition, previous, now):
+        """Validate V2 locally, then stop before every accepting side effect."""
+        anchor=self._accepted_epoch_anchor(previous)
+        candidate_sha256=hashlib.sha256(epoch_v2.canonical_json(transition)).hexdigest()
+        bridge=transition.get('bridge_predecessor') if isinstance(transition, dict) else None
+        if bridge != anchor:
+            if self.epoch_v2_bridge_root is None or previous is None:
+                raise SnapshotError('EPOCH_BRIDGE_REQUIRED')
+            with self.epoch_validation_session() as session:
+                receipt=self.validate_epoch_bridge(session, self.epoch_v2_bridge_root, previous,
+                                                   candidate_sha256, accepted_anchor=anchor, now=now)
+                self.require_verified_epoch_bridge(session, receipt, candidate_sha256, anchor,
+                                                   bridge, transition.get('bridge_binding_sha256'))
+        try:
+            epoch_v2.validate_transition(transition, anchor, self.epoch_v2_accepted_epoch_number,
+                                         self.epoch_v2_first_transition)
+        except epoch_v2.EpochV2Error as exc:
+            raise SnapshotError(exc.code) from None
+        raise SnapshotError('EPOCH_V2_NOT_ACCEPTING')
+
+    def validate_epoch_bridge(self, session, bridge_root, previous, candidate_transition_sha256, *, accepted_anchor=None, now=None):
         """Full A1 validation without profiles, accepted-state writes, or cache promotion."""
         if not isinstance(session, EpochValidationSession) or session.reader is not self or not session.active:
             raise SnapshotError('EPOCH_SESSION_INVALID')
@@ -791,15 +821,18 @@ class ProjectionReader(SnapshotReader):
         finally:
             bridge.close()
         anchor=self._epoch_descriptor(previous['manifest'],previous['manifest_hash'])
+        if accepted_anchor is not None and anchor != accepted_anchor:
+            raise SnapshotError('EPOCH_ACCEPTED_ANCHOR')
         candidate=self._epoch_descriptor(metadata['manifest'],metadata['manifest_hash'])
         binding=epoch_v2.commitment('a1-bridge-binding',{'accepted_anchor':anchor,'bridge_predecessor':candidate})
-        watermarks=epoch_v2.commitment('bridge-watermarks',candidate['watermarks'])
-        history=epoch_v2.commitment('bridge-history',candidate['coverage_history'])
+        watermarks=epoch_v2.commitment('bridge-watermarks',metadata['manifest']['watermarks'])
+        history=epoch_v2.commitment('bridge-history',metadata['manifest']['coverage_history'])
         audit=epoch_v2.commitment('bridge-audit',{'qualifications':metadata['qualification_history'],'workflow_closures_validated':metadata.get('workflow_closures_validated')})
         verified=epoch_v2.commitment('verified-a1-bridge',{'candidate_transition_sha256':candidate_transition_sha256,'accepted_anchor':anchor,'bridge_predecessor':candidate,'bridge_binding':binding,'watermarks_commitment':watermarks,'history_commitment':history,'audit_commitment':audit})
         self.metadata['epoch_bridge_stage_seconds'] = dict(metadata.get('stage_seconds', {}))
         self.metadata['epoch_bridge_peak_rss_bytes'] = metadata.get('peak_rss_bytes')
-        return VerifiedEpochBridge(session,session.token,candidate_transition_sha256,anchor,candidate,binding,verified,dict(candidate['source_checkpoint']),watermarks,history,audit)
+        return VerifiedEpochBridge(session,session.token,candidate_transition_sha256,anchor,candidate,binding,verified,
+                                   dict(metadata['manifest']['source_checkpoint']),watermarks,history,audit)
 
     @staticmethod
     def require_verified_epoch_bridge(session, receipt, candidate_transition_sha256, accepted_anchor, bridge_predecessor, bridge_binding):
