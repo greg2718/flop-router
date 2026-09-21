@@ -18,6 +18,7 @@ import time
 
 import projection_contract as c
 import projection_legacy as lg
+import scout_epoch_v2_validator as epoch_v2
 from scout_snapshot import (SnapshotReader, SnapshotError, Cancelled, _parse,
                             _basename, HASH, SNAPSHOT_ID, MAX_CURRENT_BYTES,
                             MAX_MANIFEST_BYTES, utc_timestamp)
@@ -65,7 +66,9 @@ def coverage(items, historical=False):
 
 class ProjectionReader(SnapshotReader):
     def __init__(self, root, cache_dir, check_cancel=lambda: None, timeout=30.0,
-                 max_bytes=MAX_BYTES, max_memory=MAX_MEMORY, activate_lg2=False):
+                 max_bytes=MAX_BYTES, max_memory=MAX_MEMORY, activate_lg2=False,
+                 enable_epoch_v2=False, epoch_v2_predecessor=None,
+                 epoch_v2_first_transition=False):
         super().__init__(root, check_cancel, timeout)
         if not math.isfinite(timeout) or timeout <= 0 or type(max_bytes) is not int or not 0 < max_bytes <= MAX_BYTES:
             raise ValueError('positive timeout and byte ceiling <=4 GiB required')
@@ -77,6 +80,9 @@ class ProjectionReader(SnapshotReader):
         self.max_bytes, self.max_memory = max_bytes, max_memory
         self.created = set()
         self.activate_lg2 = activate_lg2
+        self.enable_epoch_v2 = enable_epoch_v2
+        self.epoch_v2_predecessor = epoch_v2_predecessor
+        self.epoch_v2_first_transition = epoch_v2_first_transition
         self.archived_paths = set()
         self.verified_files = {}
 
@@ -194,6 +200,17 @@ class ProjectionReader(SnapshotReader):
         require(digest == pointer['manifest_sha256'], 'MANIFEST_HASH_MISMATCH')
         m = c.loads(raw, MAX_MANIFEST_BYTES)
         revision = m.get('contract_revision') if type(m) is dict else None
+        if revision == epoch_v2.REVISION:
+            if not self.enable_epoch_v2:
+                raise SnapshotError('EPOCH_V2_DISABLED')
+            try:
+                epoch_v2.validate_transition(m.get('epoch_rollover'), self.epoch_v2_predecessor,
+                                             self.epoch_v2_first_transition)
+            except epoch_v2.EpochV2Error as exc:
+                raise SnapshotError(exc.code) from None
+            # Slice 2 is deliberately validate-only: do not open an archive,
+            # copy a database, or update accepted continuity state.
+            raise SnapshotError('EPOCH_V2_NOT_ACCEPTING')
         require(revision in ('A1', lg.REVISION), 'UNSUPPORTED_REVISION')
         if revision == lg.REVISION:
             self.metadata['legacy_generation_audit']=dict(revision=revision,policy_status='NOT_VALIDATED',counts_scope='NOT_VALIDATED',
