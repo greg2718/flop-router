@@ -11,7 +11,7 @@ import scout_projection as projection
 from scout_snapshot import SnapshotError
 
 FIXTURE = Path(__file__).parent / 'docs/fixtures/scout-router-epoch-rollover-v2-conformance.json'
-FIXTURE_SHA256 = '8b3727e5f0550218a2ed9f0475b4c914ab2314e46decead0b267acd01ad11c3c'
+FIXTURE_SHA256 = 'd5892167d8221613f3ee07bfa6925280d7f39617ba999c5f5c72dd72d457daef'
 
 def h(c): return c * 64
 

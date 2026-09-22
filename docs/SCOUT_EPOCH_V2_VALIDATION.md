@@ -7,7 +7,7 @@ materializes profiles from a V2 candidate.
 - Scout Phase 0: `713b1a4`.
 - Scout Slice 1: `f65894cafa881e934bbadf437fb92779366d7b47`.
 - Frozen fixture SHA-256:
-  `8b3727e5f0550218a2ed9f0475b4c914ab2314e46decead0b267acd01ad11c3c`.
+  `d5892167d8221613f3ee07bfa6925280d7f39617ba999c5f5c72dd72d457daef`.
 - Supported pure schema/revision:
   `flop-scout-router-epoch-rollover/v2` / `A1-EPOCH-V2`.
 
@@ -42,9 +42,31 @@ anchor, bridge descriptor, and bridge binding. The receipt is neither wire data
 nor persisted state. It cannot be reused across sessions or after its session
 closes, and a candidate-provided proof field is forbidden.
 
+## Immutable archive validation
+
+An immutable archive uses the canonical checkpoint schema with exactly
+`source_id`, `source_epoch`, and `source_cut`; legacy or mixed checkpoint
+aliases are rejected. The archive must carry the canonical wire binding
+`542198d1bfc0d161b1b589760e1950b0511964cae096a5f4f8967332b471e0b3`.
+Stale bindings are rejected. Its accepted anchor and bridge predecessor must
+exactly match the live verified bridge receipt; its source epoch and cut must
+also match the bridge, while an archive source ID may differ.
+
+Router reads every archive member through a containment-checked, regular-file,
+`O_NOFOLLOW` descriptor and verifies its declared hash and size. It
+independently validates the source-evidence SQLite object set, integrity,
+metadata bindings, provenance/raw/event/link closure, and recomputes the
+redacted legacy recovery closure and commitment. Producer claims are not used
+as proof.
+
+Successful validation returns only an ephemeral `VerifiedEpochArchive`, bound
+to the same active `EpochValidationSession` as its bridge receipt and made
+non-serializable. It creates no durable archive capability or accepted state.
+
 ## Disabled terminal behavior
 
 After direct/cumulative checks and pure V2 validation succeed, Router always
-raises `EPOCH_V2_NOT_ACCEPTING`. This is the terminal result for Slice 2. No
-archive is opened, no accepted state or cache is changed, and no profile or
-routing materialization is performed.
+raises `EPOCH_V2_NOT_ACCEPTING`. This remains the terminal Slice 2 boundary:
+archive validation is read-only evidence validation, never acceptance. No
+accepted state or cache is changed, and no profile or routing materialization
+is performed.
