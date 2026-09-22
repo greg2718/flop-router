@@ -28,9 +28,7 @@ def legacy_model():
     return value
 
 
-def model():
-    """Fresh synthetic copy of Scout's frozen direct V2 wire vector."""
-    return copy.deepcopy(json.loads(FIXTURE.read_text(encoding='utf-8'))['vectors'][0]['transition'])
+from epoch_v2_test_support import model, manifest_for
 
 def trusted_previous(anchor):
     """Minimal Router accepted state which derives exactly ``anchor``."""
@@ -59,10 +57,9 @@ def test_valid_model_and_known_canonical_parity():
     assert v.commitment('predecessor',{'x':1}) == 'c09cb61457afcb028c5cd77cb0c13a3b761e52acf7cd60f2c1f1eae85fcaaa04'
 
 def test_later_shared_transition_and_self_commitment_view():
-    vector=json.loads(FIXTURE.read_text())['vectors'][1]
-    value=copy.deepcopy(vector['transition'])
+    value=model(cumulative=True)
     assert value['bridge_predecessor'] != value['accepted_anchor']
-    assert v.validate_transition(value,vector['accepted_anchor'],0,True)['epoch_number']==1
+    assert v.validate_transition(value,value['accepted_anchor'],0,True)['epoch_number']==1
     assert value['archive']['archive_commitment_sha256'] != v.commitment('archive-descriptor',value['archive'])
 
 @pytest.mark.parametrize('raw,code',[ (b'{"x":1,"x":2}','EPOCH_DUPLICATE_KEY'),(b'{"x":1.2}','EPOCH_NUMBER'),(b'{"x":"\xff"}','EPOCH_UTF8') ])
@@ -93,7 +90,7 @@ def test_default_disabled_gate_never_falls_back_or_accepts():
     raw=manifest({}); pointer={'manifest_sha256':hashlib.sha256(raw).hexdigest()}
     disabled=SimpleNamespace(enable_epoch_v2=False)
     with pytest.raises(SnapshotError,match='EPOCH_V2_DISABLED'): projection.ProjectionReader._manifest(disabled,pointer,raw,None,1,None)
-    value=model(); raw=manifest(value); pointer={'manifest_sha256':hashlib.sha256(raw).hexdigest()}
+    value=model(); raw=json.dumps(manifest_for(value)).encode('ascii'); pointer={'manifest_sha256':hashlib.sha256(raw).hexdigest()}
     enabled=SimpleNamespace(enable_epoch_v2=True,epoch_v2_accepted_epoch_number=0,epoch_v2_first_transition=True,epoch_v2_bridge_root=None)
     enabled._epoch_descriptor=projection.ProjectionReader._epoch_descriptor
     enabled._accepted_epoch_anchor=projection.ProjectionReader._accepted_epoch_anchor.__get__(enabled)
@@ -119,11 +116,9 @@ def test_errors_do_not_echo_untrusted_value():
 
 @pytest.mark.parametrize('vector', json.loads(FIXTURE.read_text())['vectors'], ids=lambda item:item['name'])
 def test_frozen_v2_fixture_parity(vector):
-    call=lambda:v.validate_transition(vector['transition'],vector['accepted_anchor'],vector['accepted_epoch_number'],vector['first_transition'])
-    if vector['expect']=='PASS':
-        assert call()['epoch_number']==1
-    else:
-        assert error(call)==vector['expect']
+    # These historical embedded-array vectors are obsolete, including former PASS cases.
+    assert error(lambda:v.validate_transition(vector['transition'],vector['accepted_anchor'],
+        vector['accepted_epoch_number'],vector['first_transition'])) == 'EPOCH_FIELDS'
 
 
 @pytest.mark.parametrize('field',['bridge_valid','bridge_mode','validation_success','verified_receipt','router_private_state_hash'])

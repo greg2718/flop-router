@@ -15,7 +15,16 @@ FIXTURE = Path(__file__).parent / 'docs/fixtures/scout-router-epoch-rollover-v2-
 
 
 def vector(name):
-    return next(copy.deepcopy(item) for item in json.loads(FIXTURE.read_text())['vectors'] if item['name'] == name)
+    from epoch_v2_test_support import model, seal
+    value = model(cumulative=name == 'valid-cumulative')
+    anchor = copy.deepcopy(value['accepted_anchor'])
+    if name == 'forged-bridge-binding': value['bridge_binding_sha256'] = '0' * 64
+    elif name == 'mutated-anchor': value['accepted_anchor']['content_id'] += 1
+    elif name == 'wrong-archive-bridge-binding':
+        value['archive']['previous_bridge_binding_sha256'] = '0' * 64
+        seal(value)
+    elif name == 'forbidden-verified_receipt': value['verified_receipt'] = True
+    return {'transition': value, 'accepted_anchor': anchor}
 
 
 def trusted_previous(anchor):

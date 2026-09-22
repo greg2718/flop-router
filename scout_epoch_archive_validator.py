@@ -14,7 +14,6 @@ import scout_epoch_v2_validator as v2
 ARCHIVE_SCHEMA='flop-scout-epoch-archive/v1'
 RECOVERY_SCHEMA='scout-legacy-a1-provenance-recovery/v1'
 SOURCE_SCHEMA='flop-scout-epoch-source-evidence/v1'
-CANONICAL_WIRE_BINDING='542198d1bfc0d161b1b589760e1950b0511964cae096a5f4f8967332b471e0b3'
 MAX_MEMBER=1024*1024*1024
 HEX=re.compile(r'^[0-9a-f]{64}$')
 ROLES={
@@ -172,7 +171,18 @@ class VerifiedEpochArchive:
 
 def validate_archive(session, bridge_receipt, root):
     """Validate an archive without accepting, caching, or constructing profiles."""
-    if not getattr(session,'active',False) or getattr(bridge_receipt,'_session',None) is not session or getattr(bridge_receipt,'_token',None) is not getattr(session,'token',None) or getattr(bridge_receipt,'bridge_binding',None)!=CANONICAL_WIRE_BINDING: fail('ARCHIVE_BRIDGE_RECEIPT')
+    # Receipt identity and liveness remain mandatory; no particular publication
+    # or real bridge hash is an authority for future validation sessions.
+    from scout_projection import EpochValidationSession, VerifiedEpochBridge
+    if (not isinstance(session, EpochValidationSession) or not isinstance(bridge_receipt, VerifiedEpochBridge)
+            or not session.active or bridge_receipt._session is not session
+            or bridge_receipt._token is not session.token):
+        fail('ARCHIVE_BRIDGE_RECEIPT')
+    try:
+        binding = v2.bridge_binding(bridge_receipt.accepted_anchor, bridge_receipt.bridge_predecessor)
+    except v2.EpochV2Error:
+        fail('ARCHIVE_BRIDGE_RECEIPT')
+    if bridge_receipt.bridge_binding != binding: fail('ARCHIVE_BRIDGE_RECEIPT')
     root=Path(root)
     if not root.is_absolute() or root.is_symlink() or not root.is_dir(): fail('ARCHIVE_MEMBER_IO')
     raw=_read_member(root,'manifest.json')
@@ -181,7 +191,7 @@ def validate_archive(session, bridge_receipt, root):
     # Descriptor is supplied by the V2 candidate normally; reconstruct it here from canonical manifest only for offline validation.
     descriptor={'schema':ARCHIVE_SCHEMA,'archive_id':manifest.get('archive_id'),'artifact_sha256':sha(raw),'size_bytes':len(raw),'database_schema_version':'flop-scout-epoch-archive-manifest/v1','locator':'archive/manifest.json','previous_epoch_id':'legacy-a1','previous_manifest_sha256':manifest.get('bridge_predecessor',{}).get('manifest_sha256'),'previous_bridge_binding_sha256':manifest.get('previous_bridge_binding_sha256'),'preservation':'IMMUTABLE_RETAINED'}
     validate_format(descriptor,manifest)
-    if _a1_descriptor(manifest['accepted_anchor'])!=_a1_descriptor(bridge_receipt.accepted_anchor) or _a1_descriptor(manifest['bridge_predecessor'])!=_a1_descriptor(bridge_receipt.bridge_predecessor) or manifest['previous_bridge_binding_sha256']!=CANONICAL_WIRE_BINDING: fail('ARCHIVE_BRIDGE_RECEIPT')
+    if _a1_descriptor(manifest['accepted_anchor'])!=_a1_descriptor(bridge_receipt.accepted_anchor) or _a1_descriptor(manifest['bridge_predecessor'])!=_a1_descriptor(bridge_receipt.bridge_predecessor) or manifest['previous_bridge_binding_sha256']!=binding: fail('ARCHIVE_BRIDGE_RECEIPT')
     checkpoint=manifest['source_checkpoint']; bridge_checkpoint=_a1_descriptor(bridge_receipt.bridge_predecessor)['source_checkpoint']
     # A recovery archive may be attributed to a distinct source ID, but not a
     # distinct epoch or cut from the already verified bridge.

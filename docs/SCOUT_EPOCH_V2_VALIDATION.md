@@ -1,72 +1,88 @@
-# Scout epoch rollover V2 Router validation — Slice 2
+# Scout compact Epoch V2 pure Router validation
 
-Status: local validation only; **disabled by default**. It never accepts,
-persists, publishes, routes, signs, settles, promotes a cache entry, or
-materializes profiles from a V2 candidate.
+Status: **disabled by default**, with no V2 acceptance, profile construction,
+cache promotion, or accepted-state mutation. V1/A1/A1-LG2 behavior is unchanged.
 
-- Scout Phase 0: `713b1a4`.
-- Scout Slice 1: `f65894cafa881e934bbadf437fb92779366d7b47`.
-- Frozen fixture SHA-256:
-  `d5892167d8221613f3ee07bfa6925280d7f39617ba999c5f5c72dd72d457daef`.
-- Supported pure schema/revision:
-  `flop-scout-router-epoch-rollover/v2` / `A1-EPOCH-V2`.
+The independent Router implementation follows Scout's frozen model at
+`2c786bf6d0b8cf5f4a6160c725da3c72afab7c74`. It imports no Scout code.
+The publication fixture is `docs/fixtures/scout-epoch-v2-publication-bundle-v1.json`,
+SHA-256 `d3dca144bacaad1f47a1b0ad5a7ee4ec2c35eaa60c946bcc282d5b5b607bb8a4`.
+All seven transition vectors and four plan vectors execute their declared
+outcomes against independently constructed synthetic compact bundles. The
+fixture's compact-candidate hash/count summary is reference metadata, not a
+bundled database or plan; these tests do not claim to validate production bytes.
+The older embedded-array fixture remains only as a rejection regression.
 
-The existing V1/A1/A1-LG2 reader path remains unchanged. A manifest declaring
-`A1-EPOCH-V2` is rejected as `EPOCH_V2_DISABLED` unless the local constructor
-argument enables the gate.
+## Pure wire validation
 
-## A1 anchor and bridge wire contract
+`scout_epoch_v2_validator.py` validates `flop-scout-router-epoch-rollover/v2`
+with revision `A1-EPOCH-V2`. Ordinary JSON parsing remains bounded to 64 KiB,
+16 levels, 256 array items, 64 object fields, 4096 ASCII bytes per string, and
+signed 63-bit magnitude integers. Duplicate keys, floats and non-finite values
+are rejected. Canonical commitments use sorted keys, compact separators and
+`SHA256("flop-scout/epoch-v2/" + domain + NUL + canonical_json)`.
 
-The V2 wire carries an `accepted_anchor` and `bridge_predecessor`, each with
-exactly these fields: `publication_sequence`, `content_id`, `manifest_sha256`,
-`artifact_sha256`, `artifact_size`, `source_kind`, `source_id`, and
-`source_cut`. `bridge_binding_sha256` is the `a1-bridge-binding` commitment of
-those two descriptors. The archive must name the bridge manifest and repeat
-that binding in `archive.previous_bridge_binding_sha256`.
+The exact normalized `accepted_anchor` and `bridge_predecessor` descriptors
+contain `publication_sequence`, `content_id`, `manifest_sha256`,
+`artifact_sha256`, `artifact_size`, `source_kind`, `source_id`, and `source_cut`.
+The `a1-bridge-binding` domain commits both complete descriptors. First-transition
+source descriptor and cut-evidence commitments derive from that bridge authority.
+The archive descriptor uses the **V2 `archive-descriptor` domain**, omitting only
+its own `archive_commitment_sha256` field; the archive manifest has its separate
+existing `flop-scout/epoch-archive-manifest/v1` commitment domain.
 
-Router does not trust the candidate's `accepted_anchor` to establish its local
-anchor. It derives the anchor only from Router's already accepted continuity
-state: the accepted manifest, manifest hash, and private cache binding. A
-candidate must exactly match that independently derived descriptor.
+Retained-floor declarations contain ordered floor entries plus count/hash pairs
+for mandatory closure, qualification history, coverage witnesses, pinned evidence
+and omitted history. Embedded sets are rejected. `bounded_commitment` and
+`compact_retained_floor` support pure recomputation from sorted unique sets.
+These summaries do not themselves prove the underlying database evidence.
 
-For a direct transition, the complete accepted anchor and bridge descriptor are
-identical. For a cumulative transition, Router reads the bridge publication
-through the normal A1 projection reader using the accepted private cache as its
-continuity predecessor. Pointer, manifest, artifact hash, schema, provenance,
-watermark, workflow, and continuity checks all run before the bridge descriptor
-is formed.
+The separately parsed redacted active-set plan permits up to 16 MiB of transport
+bytes and 50,000 selected plus omitted records. It binds the candidate source,
+archive, recovery, floor, omission and capacity fields. The transport hash and
+logical `active-set-plan` commitment are checked independently. Unknown row
+fields, duplicate raw record IDs and count mismatches are rejected.
 
-That read produces an ephemeral `VerifiedEpochBridge` receipt bound to one
-active `EpochValidationSession`, the candidate-transition hash, the trusted
-anchor, bridge descriptor, and bridge binding. The receipt is neither wire data
-nor persisted state. It cannot be reused across sessions or after its session
-closes, and a candidate-provided proof field is forbidden.
+Epoch IDs bind the frozen identity view, including active-artifact identity and
+the logical plan/recovery commitments. Active-artifact locators and plan transport
+fields are excluded from that view but included in the complete transition
+commitment. Archive identity includes its descriptor commitment. The complete
+transition omits only its own `transition_sha256` commitment, preventing a
+self-hash cycle.
 
-## Immutable archive validation
+`validate_v2_manifest` checks the exact content-only manifest shape, active
+artifact equality and transition-sidecar descriptor. `validate_transition_bytes`
+and `validate_active_set_plan_bytes` validate already-held sidecar bytes; they
+perform no acquisition or locator resolution. This is pure contract parity,
+not full database or publication acceptance.
 
-An immutable archive uses the canonical checkpoint schema with exactly
-`source_id`, `source_epoch`, and `source_cut`; legacy or mixed checkpoint
-aliases are rejected. The archive must carry the canonical wire binding
-`542198d1bfc0d161b1b589760e1950b0511964cae096a5f4f8967332b471e0b3`.
-Stale bindings are rejected. Its accepted anchor and bridge predecessor must
-exactly match the live verified bridge receipt; its source epoch and cut must
-also match the bridge, while an archive source ID may differ.
+## Local bridge and archive capabilities
 
-Router reads every archive member through a containment-checked, regular-file,
-`O_NOFOLLOW` descriptor and verifies its declared hash and size. It
-independently validates the source-evidence SQLite object set, integrity,
-metadata bindings, provenance/raw/event/link closure, and recomputes the
-redacted legacy recovery closure and commitment. Producer claims are not used
-as proof.
+Router derives its trusted anchor from already accepted continuity state, never
+from the candidate. The explicit local bridge-validation API retains the normal
+A1 pointer, artifact, schema, provenance, watermark, workflow and continuity checks.
+Its `VerifiedEpochBridge` remains bound to the active `EpochValidationSession`,
+candidate transition hash, complete descriptors and binding. Receipts are neither
+wire data nor serializable state and cannot cross sessions or survive closure.
 
-Successful validation returns only an ephemeral `VerifiedEpochArchive`, bound
-to the same active `EpochValidationSession` as its bridge receipt and made
-non-serializable. It creates no durable archive capability or accepted state.
+Archive validation derives the expected binding from the live receipt's anchor
+and bridge. There is no fixed real-publication bridge hash. The archive must match
+both descriptors and the derived binding. Its canonical checkpoint has exactly
+`source_id`, `source_epoch`, and `source_cut`; epoch and cut match the bridge,
+while the archive source ID may differ.
 
-## Disabled terminal behavior
+Existing containment, regular-file, `O_NOFOLLOW`, hash/size, source-evidence,
+provenance, recovery and session-bound `VerifiedEpochArchive` checks remain.
+Legacy archive recovery remains scoped to the existing recovery evidence contract;
+this change does not generalize its real-cohort record/closure checks.
 
-After direct/cumulative checks and pure V2 validation succeed, Router always
-raises `EPOCH_V2_NOT_ACCEPTING`. This remains the terminal Slice 2 boundary:
-archive validation is read-only evidence validation, never acceptance. No
-accepted state or cache is changed, and no profile or routing materialization
-is performed.
+## Disabled reader behavior
+
+The pointer remains `flop-scout-router-current/v2` with exactly `schema`,
+`manifest`, `manifest_sha256`, and `published_at`. Manifest revision dispatch
+returns `EPOCH_V2_DISABLED` by default without A1 fallback. Even with the local
+constructor flag enabled, acquisition stops at `EPOCH_V2_NOT_ACCEPTING`;
+obsolete embedded `epoch_rollover` manifests are rejected. Pure validation is
+invoked explicitly with held objects/bytes, not through an enabled acceptance path.
+The existing explicit direct/cumulative local validation helper also terminates
+at `EPOCH_V2_NOT_ACCEPTING` after successful checks.

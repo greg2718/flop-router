@@ -249,12 +249,10 @@ class ProjectionReader(SnapshotReader):
         if revision == epoch_v2.REVISION:
             if not self.enable_epoch_v2:
                 raise SnapshotError('EPOCH_V2_DISABLED')
-            try:
-                self._validate_epoch_v2_disabled(m.get('epoch_rollover'), previous, now)
-            except epoch_v2.EpochV2Error as exc:
-                raise SnapshotError(exc.code) from None
-            # Slice 2 is deliberately validate-only: do not open an archive,
-            # copy a database, or update accepted continuity state.
+            # Pure bundle validation is explicit and consumes already-held bytes.
+            # Acquisition/acceptance is not implemented, even when opted in.
+            if 'epoch_rollover' in m:
+                raise SnapshotError('EPOCH_MANIFEST_FIELDS')
             raise SnapshotError('EPOCH_V2_NOT_ACCEPTING')
         require(revision in ('A1', lg.REVISION), 'UNSUPPORTED_REVISION')
         if revision == lg.REVISION:
@@ -824,7 +822,7 @@ class ProjectionReader(SnapshotReader):
         if accepted_anchor is not None and anchor != accepted_anchor:
             raise SnapshotError('EPOCH_ACCEPTED_ANCHOR')
         candidate=self._epoch_descriptor(metadata['manifest'],metadata['manifest_hash'])
-        binding=epoch_v2.commitment('a1-bridge-binding',{'accepted_anchor':anchor,'bridge_predecessor':candidate})
+        binding=epoch_v2.bridge_binding(anchor,candidate)
         watermarks=epoch_v2.commitment('bridge-watermarks',metadata['manifest']['watermarks'])
         history=epoch_v2.commitment('bridge-history',metadata['manifest']['coverage_history'])
         audit=epoch_v2.commitment('bridge-audit',{'qualifications':metadata['qualification_history'],'workflow_closures_validated':metadata.get('workflow_closures_validated')})
