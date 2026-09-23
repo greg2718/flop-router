@@ -1,0 +1,182 @@
+{
+  "acceptance_performed": false,
+  "all_five_summaries_match": true,
+  "commitments": {
+    "coverage_witnesses": "07fb5de37f24d2c5680ff70856c9242d35fc33df68cef82f98dd8a34c69b1103",
+    "durable_qualification_history": "58c3042e49ff308ebd1eabf3b3f98b3b3ac402a531fd045875326e5da5ce0486",
+    "mandatory_proof_closure": "1b4747e2f591025038f30841d41fab71bd81514c73c7991decf367b612103c1e",
+    "omitted_history": "9ddae34ecf2fbe403f4be4cd0ea6d48b5c915a30442e8b6f73138d09b0855b6a",
+    "permanent_pinned_evidence": "967e5be80d8d03ce62d84c30ddfe246799b481ae748e67426dda11240f318d6c",
+    "recovery": "7098014195c19b3dbf184d5327d7d4dcdcf4c6ccb510d53148b1372fa42cdcd6"
+  },
+  "content_id": 243,
+  "counts": {
+    "coverage_witnesses": 6,
+    "durable_qualification_history": 7330,
+    "eligible": 49808,
+    "mandatory_proof_closure": 10427,
+    "omitted": 5968,
+    "omitted_history": 5968,
+    "permanent_pinned_evidence": 9922,
+    "selected": 43840
+  },
+  "descriptor_identities": {
+    "active_artifact": "fbff1589749d0edac1c9704d8677ec48182c8ccc5a42d7feb018b22f62ce6088",
+    "active_set_plan": "1cb2929e25fafb065d69621a973d917980d2139b72551d6f085a97153a5e7f07",
+    "archive": "bf84c772a3a16b1798f539cc815c4defd1a9ed105757e3bd5284c7f5fe97ca5d",
+    "bridge_projection_sqlite": "b84eca87467a00eeabd90f7ec0e19e2662804f34be3e11e35c759225bfbf54b3",
+    "legacy_recovery_json": "16bf3d854ddefefbc3e01563b77c524859819d6ab7041fca1c0b2c9e7a10a041",
+    "source_evidence_sqlite": "ebe6ff9f98d59b865d5bbf43334f5160f5092a3823cd4da9ecd7c8b861554baf",
+    "transition": "ca534b7aa0451d711e7f56eda32f55c11bcd1d28710895790b2e8df865fef824"
+  },
+  "epoch_id": "se2:076158cddf732ffb17dd49d09c8a83af4ca9cf9b5588dbf04330526364e85718",
+  "error": "EPOCH_PLAN_BINDING",
+  "inputs_after": {
+    "archive_bridge": {
+      "ctime_ns": 1790045450416678720,
+      "inode": 144393499,
+      "mtime_ns": 1790045450416678720,
+      "sha256": "b84eca87467a00eeabd90f7ec0e19e2662804f34be3e11e35c759225bfbf54b3",
+      "size_bytes": 140017664
+    },
+    "archive_manifest": {
+      "ctime_ns": 1790045450645883175,
+      "inode": 144393503,
+      "mtime_ns": 1790045450645883175,
+      "sha256": "2a2efa524c5e0f607289ec774c4e6904a5a7dbba6483f2c61b3b13908a3c7b01",
+      "size_bytes": 2096
+    },
+    "archive_recovery": {
+      "ctime_ns": 1790045450642753101,
+      "inode": 144393502,
+      "mtime_ns": 1790045450642753101,
+      "sha256": "16bf3d854ddefefbc3e01563b77c524859819d6ab7041fca1c0b2c9e7a10a041",
+      "size_bytes": 3605366
+    },
+    "archive_source": {
+      "ctime_ns": 1790045450590347379,
+      "inode": 144393500,
+      "mtime_ns": 1790045450590347379,
+      "sha256": "ebe6ff9f98d59b865d5bbf43334f5160f5092a3823cd4da9ecd7c8b861554baf",
+      "size_bytes": 154791936
+    },
+    "artifact": {
+      "ctime_ns": 1790109606173266913,
+      "inode": 144902542,
+      "mtime_ns": 1790097799858975136,
+      "sha256": "65c5db170085e2d4b41f3f5d9f09dc588ca5eec8d1f23bd50a4fc3ee01d2a301",
+      "size_bytes": 127086592
+    },
+    "manifest": {
+      "ctime_ns": 1790109606173482287,
+      "inode": 144997901,
+      "mtime_ns": 1790109606173034040,
+      "sha256": "9a25372a60c23c6a7d889fb6dc7c303a05c6cfaf3b932eb9afc904df0a5d3539",
+      "size_bytes": 3454
+    },
+    "plan": {
+      "ctime_ns": 1790109606173369371,
+      "inode": 144902386,
+      "mtime_ns": 1790097774666727677,
+      "sha256": "ed3ce95eca784d8a0f2b28bd5706d990bc613ef2047843871ba66b1773f4832f",
+      "size_bytes": 16324808
+    },
+    "pointer": {
+      "ctime_ns": 1790109606173525037,
+      "inode": 144997902,
+      "mtime_ns": 1790109606173195205,
+      "sha256": "08cebb3ca2d95e064e0b4cd04c3bb2ff371554cf7e165787ba87f8f3789c1edf",
+      "size_bytes": 263
+    },
+    "transition": {
+      "ctime_ns": 1790109606173437746,
+      "inode": 144997847,
+      "mtime_ns": 1790109599385522532,
+      "sha256": "46f0370b2ba2c6caf487ced16f13fbd2e8075b65146c4a9449519517cc2cd11b",
+      "size_bytes": 5697
+    }
+  },
+  "inputs_before": {
+    "archive_bridge": {
+      "ctime_ns": 1790045450416678720,
+      "inode": 144393499,
+      "mtime_ns": 1790045450416678720,
+      "sha256": "b84eca87467a00eeabd90f7ec0e19e2662804f34be3e11e35c759225bfbf54b3",
+      "size_bytes": 140017664
+    },
+    "archive_manifest": {
+      "ctime_ns": 1790045450645883175,
+      "inode": 144393503,
+      "mtime_ns": 1790045450645883175,
+      "sha256": "2a2efa524c5e0f607289ec774c4e6904a5a7dbba6483f2c61b3b13908a3c7b01",
+      "size_bytes": 2096
+    },
+    "archive_recovery": {
+      "ctime_ns": 1790045450642753101,
+      "inode": 144393502,
+      "mtime_ns": 1790045450642753101,
+      "sha256": "16bf3d854ddefefbc3e01563b77c524859819d6ab7041fca1c0b2c9e7a10a041",
+      "size_bytes": 3605366
+    },
+    "archive_source": {
+      "ctime_ns": 1790045450590347379,
+      "inode": 144393500,
+      "mtime_ns": 1790045450590347379,
+      "sha256": "ebe6ff9f98d59b865d5bbf43334f5160f5092a3823cd4da9ecd7c8b861554baf",
+      "size_bytes": 154791936
+    },
+    "artifact": {
+      "ctime_ns": 1790109606173266913,
+      "inode": 144902542,
+      "mtime_ns": 1790097799858975136,
+      "sha256": "65c5db170085e2d4b41f3f5d9f09dc588ca5eec8d1f23bd50a4fc3ee01d2a301",
+      "size_bytes": 127086592
+    },
+    "manifest": {
+      "ctime_ns": 1790109606173482287,
+      "inode": 144997901,
+      "mtime_ns": 1790109606173034040,
+      "sha256": "9a25372a60c23c6a7d889fb6dc7c303a05c6cfaf3b932eb9afc904df0a5d3539",
+      "size_bytes": 3454
+    },
+    "plan": {
+      "ctime_ns": 1790109606173369371,
+      "inode": 144902386,
+      "mtime_ns": 1790097774666727677,
+      "sha256": "ed3ce95eca784d8a0f2b28bd5706d990bc613ef2047843871ba66b1773f4832f",
+      "size_bytes": 16324808
+    },
+    "pointer": {
+      "ctime_ns": 1790109606173525037,
+      "inode": 144997902,
+      "mtime_ns": 1790109606173195205,
+      "sha256": "08cebb3ca2d95e064e0b4cd04c3bb2ff371554cf7e165787ba87f8f3789c1edf",
+      "size_bytes": 263
+    },
+    "transition": {
+      "ctime_ns": 1790109606173437746,
+      "inode": 144997847,
+      "mtime_ns": 1790109599385522532,
+      "sha256": "46f0370b2ba2c6caf487ced16f13fbd2e8075b65146c4a9449519517cc2cd11b",
+      "size_bytes": 5697
+    }
+  },
+  "inputs_unchanged": true,
+  "peak_rss_bytes": 468156416,
+  "plan_binding_mismatches": {
+    "omission_commitment_sha256": {
+      "plan": "2d8d9e5ce315670fd312a252c62564751cc9be9c17bf3823ca26cd2e973db925",
+      "transition": "9ddae34ecf2fbe403f4be4cd0ea6d48b5c915a30442e8b6f73138d09b0855b6a"
+    },
+    "retained_floor_commitment_sha256": {
+      "plan": "a8fac3dc217435268f6b5ca92fc9382cf954c15e7907183d1d1022cd85fb973f",
+      "transition": "b8ebd4d0819ea6ef1d6ee56b9fd97752483e8d8aea318573847cd02e97f8494e"
+    }
+  },
+  "publication_sequence": 279,
+  "reconstruction_seconds": 11.989494875073433,
+  "router_state_written": false,
+  "schema": "flop-router-epoch-evidence-audit/v1",
+  "status": "REJECTED",
+  "total_seconds": 12.557559042004868
+}
