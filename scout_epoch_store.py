@@ -1,4 +1,4 @@
-"""Crash-safe, explicitly disposable Epoch V2 store. No production worker wiring.
+"""Crash-safe Epoch V2 stores for disposable rehearsal and explicit worker dispatch.
 
 The state file is the sole commit point. Generation files are immutable and
 fully synced before it can name them. A journal records both possible state
@@ -65,16 +65,21 @@ class DisposableEpochStore:
     cache_path pointing at a private copy under this directory. No session
     objects or tokens are persisted. The fault hook is for crash-boundary tests.
     """
-    def __init__(self, root, fault=lambda boundary: None):
+    marker_name = 'disposable.json'
+    state_name = 'state.json'
+
+    def __init__(self, root, fault=lambda boundary: None, check_io=lambda: None):
         self.root = Path(root)
         check(self.root.is_absolute() and self.root.resolve() == self.root)
         info = self.root.stat()
         check(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
               and not info.st_mode & 0o077)
-        check(json.loads(read_private(self.root / 'disposable.json')) ==
-              {'schema': 'router-disposable-epoch-store/v1'})
+        if self.marker_name is not None:
+            check(json.loads(read_private(self.root / self.marker_name)) ==
+                  {'schema': 'router-disposable-epoch-store/v1'})
         self.fault = fault
-        self.state_path = self.root / 'state.json'
+        self.check_io = check_io
+        self.state_path = self.root / self.state_name
 
     @contextmanager
     def locked(self):
@@ -129,9 +134,10 @@ class DisposableEpochStore:
             check(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                   and not info.st_mode & 0o022
                   and 0 < info.st_size <= 4 * 1024**3
-                  and info.st_size == previous.get('size_bytes'))
+                  and info.st_size == previous.get('size_bytes', previous.get('manifest', {}).get('size_bytes')))
             h = hashlib.sha256()
             for chunk in iter(lambda: os.read(fd, 1024 * 1024), b''):
+                self.check_io()
                 h.update(chunk)
             check(h.hexdigest() == previous['database_hash'], 'EPOCH_STORE_CACHE_HASH')
             after = os.fstat(fd)
@@ -142,8 +148,11 @@ class DisposableEpochStore:
         if previous.get('contract_revision') == 'A1-EPOCH-V2':
             proof = read_private(cache.parent / 'commitments.json')
             check(digest(proof) == state.get('epoch_commitments_sha256'), 'EPOCH_STORE_RECOVERY_HASH')
-            check(read_private(cache.parent / 'accepted.json') == raw, 'EPOCH_STORE_RECOVERY_HASH')
+            self.verify_record(read_private(cache.parent / 'accepted.json'), raw)
         return raw, state
+
+    def verify_record(self, accepted, current):
+        check(accepted == current, 'EPOCH_STORE_RECOVERY_HASH')
 
     def recover(self):
         """Caller holds lock. A corrupt/ambiguous journal always fails closed."""
@@ -209,6 +218,7 @@ class DisposableEpochStore:
         with open(artifact, 'rb') as source, open(stage / cache_name, 'xb') as target:
             os.chmod(stage / cache_name, 0o600)
             for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                self.check_io()
                 hasher.update(chunk)
                 target.write(chunk)
             target.flush()
@@ -234,3 +244,18 @@ class DisposableEpochStore:
         self.sync(self.root, 'commit_directory')
         # Keep the journal until restart/recovery verifies the completed commit.
         return state
+
+
+class WorkerEpochStore(DisposableEpochStore):
+    """Same journal/commit algorithm, rooted in Router's private worker directory.
+
+    Operational status is mutable; accepted projection and commitment identities
+    are immutable. A pending journal still requires exact whole-state hashes.
+    """
+    marker_name = None
+    state_name = 'worker_state.json'
+
+    def verify_record(self, accepted, current):
+        left, right = json.loads(accepted), json.loads(current)
+        for field in ('last_accepted_projection_v2', 'epoch_commitments_sha256'):
+            check(encoded(left.get(field)) == encoded(right.get(field)), 'EPOCH_STORE_RECOVERY_HASH')

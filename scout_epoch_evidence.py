@@ -509,7 +509,7 @@ def summary_for(transition, sets, eligible, selected, recovery_digest, manifest)
 
 
 def reconstruct(transition, *, accepted_anchor, plan_path, artifact_path, archive_root,
-                accepted_epoch_number=0, first_transition=True, timeout=180.0):
+                accepted_epoch_number=0, first_transition=True, timeout=180.0, scratch_root=None, check_external=None):
     """Reconstruct and check all five compact sets, returning redacted audit facts.
 
     Late summary/plan binding failures carry the recomputed diagnostic summary on
@@ -518,12 +518,14 @@ def reconstruct(transition, *, accepted_anchor, plan_path, artifact_path, archiv
     """
     require(type(timeout) in (int, float) and 0 < timeout <= 3600, 'EVIDENCE_TIMEOUT')
     deadline = time.monotonic() + timeout
-    def check(): require(time.monotonic() < deadline, 'EVIDENCE_TIMEOUT')
+    def check():
+        require(time.monotonic() < deadline, 'EVIDENCE_TIMEOUT')
+        if check_external is not None: check_external()
     # Snapshot caller-owned objects to avoid in-process descriptor mutations.
     transition = v2.parse_json(v2.canonical_json(transition))
     v2.validate_transition(transition, accepted_anchor, accepted_epoch_number, first_transition)
     try:
-        with tempfile.TemporaryDirectory(prefix='router-epoch-evidence-') as scratch, ExitStack() as stack:
+        with tempfile.TemporaryDirectory(prefix='router-epoch-evidence-', dir=scratch_root) as scratch, ExitStack() as stack:
             held = HeldInputs(scratch, check)
             stack.callback(held.close)
             desc = transition['active_set_plan']

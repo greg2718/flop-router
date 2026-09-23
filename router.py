@@ -5450,8 +5450,26 @@ def worker_paths(state_dir: Path) -> dict[str, Path]:
     }
 
 
+def _recover_epoch_worker(state_dir: Path, timeout=30., check_cancel=lambda: None) -> None:
+    root = worker_paths(state_dir)["dir"]
+    if (root / "journal.json").exists():
+        from scout_epoch_store import WorkerEpochStore
+        try:
+            deadline=time.monotonic()+timeout
+            def check_io():
+                check_cancel()
+                if time.monotonic()>deadline:
+                    raise scout_snapshot.SnapshotError("EPOCH_RECOVERY_TIMEOUT")
+            store = WorkerEpochStore(root, check_io=check_io)
+            with store.locked(): store.recover()
+        except BlockingIOError:
+            raise scout_snapshot.SnapshotError("EPOCH_WRITER_BUSY") from None
+
+
 def _atomic_json_write(path: Path, value: dict) -> None:
     import tempfile
+    if path.name == "worker_state.json" and (path.parent / "journal.json").exists():
+        raise scout_snapshot.SnapshotError("EPOCH_RECOVERY_REQUIRED")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".state-",dir=path.parent)
     try:
@@ -5523,7 +5541,9 @@ def worker_sources(state_dir: Path, scout_snapshot_root: Path | None = None,
                    snapshot_timeout: float = 30.0, max_projection_memory: int = scout_projection.MAX_MEMORY,
                    activate_scout_v2: bool = False, bench_proof_store: Path | None = None, activate_scout_lg2: bool = False,
                    sentinel_executable: Path = DEFAULT_SENTINEL_EXECUTABLE,
-                   sentinel_timeout: float = DEFAULT_SENTINEL_TIMEOUT) -> list[dict]:
+                   sentinel_timeout: float = DEFAULT_SENTINEL_TIMEOUT,
+                   enable_scout_epoch_v2: bool = False, epoch_archive_root: Path | None = None,
+                   epoch_bridge_root: Path | None = None, epoch_disk_budget: int = 8*1024**3) -> list[dict]:
     """None explicitly means unconfigured; workers never inherit devdata defaults."""
     if not math.isfinite(max_snapshot_age) or max_snapshot_age <= 0:
         raise ValueError("max snapshot age must be finite and positive")
@@ -5540,6 +5560,8 @@ def worker_sources(state_dir: Path, scout_snapshot_root: Path | None = None,
         outputs = (worker_paths(state_dir)["dir"], Path(task_inbox).expanduser().resolve() if task_inbox else worker_paths(state_dir)["tasks"])
         if any(path.is_relative_to(publication) for path in outputs):
             raise ValueError("Router output paths must not be inside the Scout publication root")
+    if type(enable_scout_epoch_v2) is not bool or type(epoch_disk_budget) is not int or not 512*1024**2 <= epoch_disk_budget <= 64*1024**3:
+        raise ValueError("Invalid explicit Epoch V2 configuration")
     specs = [
         ("scout_snapshot", scout_snapshot_root, True, "scout-publication/v2-A1"),
         ("validation_store", validation_store, False, "validation-jsonl"),
@@ -5556,7 +5578,11 @@ def worker_sources(state_dir: Path, scout_snapshot_root: Path | None = None,
         "last_modified": None, "record_count": None,
         **({"max_snapshot_age": max_snapshot_age, "max_snapshot_bytes": max_snapshot_bytes,
             "snapshot_timeout": snapshot_timeout, "max_projection_memory": max_projection_memory,
-            "activate_scout_v2": activate_scout_v2, "activate_scout_lg2": activate_scout_lg2, "current_pointer_status": "NOT_CHECKED"} if name == "scout_snapshot" else {}),
+            "activate_scout_v2": activate_scout_v2, "activate_scout_lg2": activate_scout_lg2,
+            "enable_scout_epoch_v2": enable_scout_epoch_v2,
+            "epoch_archive_root": str(epoch_archive_root) if epoch_archive_root is not None else None,
+            "epoch_bridge_root": str(epoch_bridge_root) if epoch_bridge_root is not None else None,
+            "epoch_disk_budget": epoch_disk_budget, "current_pointer_status": "NOT_CHECKED"} if name == "scout_snapshot" else {}),
         "reason": "NOT_CHECKED" if required or path is not None else "DISABLED_UNCONFIGURED",
     } for name, path, required, kind in specs]
 
@@ -5674,7 +5700,12 @@ def _projection_observation(row):
 def _projection_reader(source, state_dir, cancellation):
     return scout_projection.ProjectionReader(source["path"], worker_paths(state_dir)["dir"] / "v2-copies",
         cancellation.check, timeout=source["snapshot_timeout"], max_bytes=source["max_snapshot_bytes"],
-        max_memory=source["max_projection_memory"], activate_lg2=source.get("activate_scout_lg2", False))
+        max_memory=source["max_projection_memory"], activate_lg2=source.get("activate_scout_lg2", False),
+        enable_epoch_v2=source.get("enable_scout_epoch_v2", False),
+        epoch_v2_state_dir=worker_paths(state_dir)["dir"],
+        epoch_v2_archive_root=source.get("epoch_archive_root"),
+        epoch_v2_bridge_root=source.get("epoch_bridge_root"),
+        epoch_v2_disk_budget=source.get("epoch_disk_budget", 8*1024**3))
 
 
 def _worker_json_records(path: Path) -> list[dict]:
@@ -5740,6 +5771,7 @@ def _worker_inputs(sources: list[dict], state_dir: Path, cancellation: WorkerCan
         if source["name"] == "scout_snapshot":
             configuration = {"name", "path", "enabled", "required", "type", "max_snapshot_age",
                 "max_snapshot_bytes", "snapshot_timeout", "max_projection_memory", "activate_scout_v2", "activate_scout_lg2",
+                "enable_scout_epoch_v2", "epoch_archive_root", "epoch_bridge_root", "epoch_disk_budget",
                 "exists", "readable", "valid", "last_modified", "record_count", "detail", "reason"}
             for key in tuple(source):
                 if key not in configuration: source.pop(key)
@@ -5915,6 +5947,8 @@ def run_worker_cycle(
     max_snapshot_bytes: int = scout_projection.MAX_BYTES, snapshot_timeout: float = 30.,
     max_projection_memory: int = scout_projection.MAX_MEMORY, activate_scout_v2: bool = False,
     activate_scout_lg2: bool = False,
+    enable_scout_epoch_v2: bool = False, epoch_archive_root: Path | None = None,
+    epoch_bridge_root: Path | None = None, epoch_disk_budget: int = 8*1024**3,
     sentinel_executable: Path = DEFAULT_SENTINEL_EXECUTABLE, sentinel_timeout: float = DEFAULT_SENTINEL_TIMEOUT,
     *, sources: list[dict] | None = None, cancellation=None, snapshot_reader=None,
 ) -> dict:
@@ -5923,8 +5957,9 @@ def run_worker_cycle(
     cancellation = cancellation or WorkerCancellation()
     cancellation.check()
     if sources is None:
-        sources = worker_sources(state_dir, scout_snapshot_root, validation_store, ingest_store, tclk_store, task_inbox, max_snapshot_age, max_snapshot_bytes, snapshot_timeout, max_projection_memory, activate_scout_v2, activate_scout_lg2=activate_scout_lg2)
+        sources = worker_sources(state_dir, scout_snapshot_root, validation_store, ingest_store, tclk_store, task_inbox, max_snapshot_age, max_snapshot_bytes, snapshot_timeout, max_projection_memory, activate_scout_v2, activate_scout_lg2=activate_scout_lg2, enable_scout_epoch_v2=enable_scout_epoch_v2, epoch_archive_root=epoch_archive_root, epoch_bridge_root=epoch_bridge_root, epoch_disk_budget=epoch_disk_budget)
     cancellation.memory_limit = sources[0]["max_projection_memory"]
+    _recover_epoch_worker(state_dir, sources[0]["snapshot_timeout"], cancellation.check)
     try:
         _initialize_worker_inbox(state_dir, sources)
     except OSError:
@@ -6074,6 +6109,7 @@ def run_worker_cycle(
 
 
 def _persist_worker_cycle(state_dir: Path, cycle: dict) -> None:
+    _recover_epoch_worker(state_dir)
     paths = worker_paths(state_dir)
     _worker_record_append(paths["cycles"], cycle)
     state = _load_json_or_default(paths["state"], {})
@@ -6090,6 +6126,10 @@ def _persist_worker_cycle(state_dir: Path, cycle: dict) -> None:
     })
     for source in cycle["sources"]:
         if source["name"] == "scout_snapshot" and source["valid"] and ready:
+            if source.get("contract_revision") == "A1-EPOCH-V2":
+                # The journaled commit owns this checkpoint. Status must never
+                # reconstruct or overwrite acceptance-critical state.
+                continue
             state["last_accepted_projection_v2"] = {key: source[key] for key in
                 ("snapshot_id", "manifest_hash", "database_hash", "database_content_id", "produced_at", "published_at",
                  "watermarks", "coverage_history", "contract_revision", "manifest", "manifest_canonical_hash", "cache_path")}
@@ -6128,7 +6168,7 @@ def _safe_worker_cycle(state_dir: Path, sources: list[dict], cancellation=None, 
                  "duplicate_decisions_suppressed": 0, "network_writes": 0, "private_key_accesses": 0}
         try:
             _persist_worker_cycle(state_dir, cycle)
-        except (ValueError, OSError):
+        except (ValueError, OSError, scout_snapshot.SnapshotError):
             # Preserve corrupt/unreadable checkpoint bytes; report without resetting.
             cycle["errors"].append("WORKER_STATE_UNAVAILABLE")
         return cycle
@@ -6443,6 +6483,10 @@ def main() -> None:
         worker_parser.add_argument("--max-projection-memory", type=int, default=scout_projection.MAX_MEMORY)
         worker_parser.add_argument("--activate-scout-lg2", action="store_true", help="Explicit A1/LG1 checkpoint migration to LG2; preserve history and rebuild caches")
         worker_parser.add_argument("--activate-scout-v2", action="store_true", help="Explicit migration from retained V1 checkpoint")
+        worker_parser.add_argument("--enable-scout-epoch-v2", action="store_true", help="Explicit atomic A1-to-Epoch-V2 acceptance; disabled by default")
+        worker_parser.add_argument("--epoch-archive-root", type=Path, help="Operator-installed immutable archive root; required for Epoch V2 acceptance")
+        worker_parser.add_argument("--epoch-bridge-root", type=Path, help="Exact retained A1 bridge publication root; required for Epoch V2 acceptance")
+        worker_parser.add_argument("--epoch-disk-budget", type=int, default=8*1024**3, help="Maximum Epoch V2 staging bytes, preflighted plus 256 MiB reserve")
         worker_parser.add_argument("--validation-store", dest="worker_validation_store", type=Path, help="Validation attempts JSONL; omitted means disabled")
         worker_parser.add_argument("--ingest-store", dest="worker_ingest_store", type=Path, help="Normalized Scout exports JSONL; omitted means disabled")
         worker_parser.add_argument("--tclk-store", dest="worker_tclk_store", type=Path, help="Normalized TCLK JSONL; omitted means disabled")
@@ -6477,7 +6521,9 @@ def main() -> None:
                       ingest_store=args.worker_ingest_store, tclk_store=args.worker_tclk_store,
                       task_inbox=args.task_inbox, max_snapshot_bytes=args.max_snapshot_bytes,
                       snapshot_timeout=args.snapshot_timeout, max_projection_memory=args.max_projection_memory,
-                      activate_scout_v2=args.activate_scout_v2, activate_scout_lg2=args.activate_scout_lg2, bench_proof_store=args.bench_proof_store)
+                      activate_scout_v2=args.activate_scout_v2, activate_scout_lg2=args.activate_scout_lg2, bench_proof_store=args.bench_proof_store,
+                      enable_scout_epoch_v2=args.enable_scout_epoch_v2, epoch_archive_root=args.epoch_archive_root,
+                      epoch_bridge_root=args.epoch_bridge_root, epoch_disk_budget=args.epoch_disk_budget)
         inputs.update(sentinel_executable=args.sentinel_executable, sentinel_timeout=args.sentinel_timeout)
         if args.worker_command == "once":
             cycle = worker_once(state_dir, **inputs)

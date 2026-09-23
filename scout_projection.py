@@ -112,7 +112,9 @@ class ProjectionReader(SnapshotReader):
                  max_bytes=MAX_BYTES, max_memory=MAX_MEMORY, activate_lg2=False,
                  enable_epoch_v2=False, epoch_v2_predecessor=None,
                  epoch_v2_first_transition=False,
-                 epoch_v2_accepted_epoch_number=0, epoch_v2_bridge_root=None):
+                 epoch_v2_accepted_epoch_number=0, epoch_v2_bridge_root=None,
+                 epoch_v2_state_dir=None, epoch_v2_archive_root=None,
+                 epoch_v2_disk_budget=8*1024**3):
         super().__init__(root, check_cancel, timeout)
         if not math.isfinite(timeout) or timeout <= 0 or type(max_bytes) is not int or not 0 < max_bytes <= MAX_BYTES:
             raise ValueError('positive timeout and byte ceiling <=4 GiB required')
@@ -128,7 +130,10 @@ class ProjectionReader(SnapshotReader):
         self.epoch_v2_predecessor = epoch_v2_predecessor
         self.epoch_v2_first_transition = epoch_v2_first_transition
         self.epoch_v2_accepted_epoch_number = epoch_v2_accepted_epoch_number
-        self.epoch_v2_bridge_root = Path(epoch_v2_bridge_root).resolve() if epoch_v2_bridge_root else None
+        self.epoch_v2_bridge_root = Path(epoch_v2_bridge_root) if epoch_v2_bridge_root else None
+        self.epoch_v2_state_dir = Path(epoch_v2_state_dir) if epoch_v2_state_dir is not None else None
+        self.epoch_v2_archive_root = Path(epoch_v2_archive_root) if epoch_v2_archive_root is not None else None
+        self.epoch_v2_disk_budget = epoch_v2_disk_budget
         self.archived_paths = set()
         self.verified_files = {}
 
@@ -249,8 +254,8 @@ class ProjectionReader(SnapshotReader):
         if revision == epoch_v2.REVISION:
             if not self.enable_epoch_v2:
                 raise SnapshotError('EPOCH_V2_DISABLED')
-            # Pure bundle validation is explicit and consumes already-held bytes.
-            # Acquisition/acceptance is not implemented, even when opted in.
+            # Readers without an explicit worker store remain validation-only.
+            # Operational acceptance is dispatched before this A1-only method.
             if 'epoch_rollover' in m:
                 raise SnapshotError('EPOCH_MANIFEST_FIELDS')
             raise SnapshotError('EPOCH_V2_NOT_ACCEPTING')
@@ -668,6 +673,13 @@ class ProjectionReader(SnapshotReader):
         self.metadata['workflow_closures_validated']=True
 
     def read(self,consume,previous=None,max_age=3600.,now=None,*,allow_stale=False,retain_candidate=True):
+        if self.epoch_v2_state_dir is not None:
+            from scout_epoch_dispatch import dispatch
+            return dispatch(self, consume, previous, max_age, now, allow_stale, retain_candidate)
+        return self._read_a1(consume, previous, max_age, now,
+                             allow_stale=allow_stale, retain_candidate=retain_candidate)
+
+    def _read_a1(self,consume,previous=None,max_age=3600.,now=None,*,allow_stale=False,retain_candidate=True):
         if not math.isfinite(max_age) or max_age<=0: raise ValueError('positive max age required')
         start=time.monotonic(); self.deadline=start+self.timeout
         self.metadata={'root_path':str(self.root),'current_pointer_status':'NOT_CHECKED','stage_seconds':{},'readiness':'INVALID','readiness_phase':'ACQUIRING','max_snapshot_bytes':self.max_bytes,'max_memory_bytes':self.max_memory,'deadline_seconds':self.timeout}

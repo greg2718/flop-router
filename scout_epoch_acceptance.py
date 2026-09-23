@@ -73,7 +73,7 @@ def _publication(held, root, stage, expected=None):
     return pointer, manifest
 
 
-def _metadata(reader, pointer, manifest, transition, previous, now):
+def _metadata(reader, pointer, manifest, transition, previous, now, max_age=3600):
     """Validate A1 metadata semantics without inventing any transport bytes."""
     m = copy.deepcopy(manifest)
     require(m['selection_policy'] == c.POLICY and m['selection_policy_sha256'] == c.POLICY_SHA, 'UNSUPPORTED_POLICY')
@@ -83,7 +83,7 @@ def _metadata(reader, pointer, manifest, transition, previous, now):
     published = utc_timestamp(pointer['published_at'])
     require(times['content_created_at'] <= times['selection_evaluated_at'] == times['produced_at'] <= published
             and (published - now).total_seconds() <= 60, 'INVALID_PUBLICATION_TIME')
-    require((now - times['produced_at']).total_seconds() <= 3600, 'SNAPSHOT_STALE')
+    require((now - times['produced_at']).total_seconds() <= max_age, 'SNAPSHOT_STALE')
     require(m['content_created_at'] == transition['created_at'], 'EPOCH_CONTENT_TIME')
     for key in times:
         require(times[key] >= utc_timestamp(previous['manifest'][key]), 'CONTINUITY_TIME_ROLLBACK')
@@ -107,7 +107,7 @@ def _metadata(reader, pointer, manifest, transition, previous, now):
     return m
 
 
-def _content(reader, artifact, bridge, manifest, previous, omitted, scratch):
+def _content(reader, artifact, bridge, manifest, previous, omitted, scratch, materialize=None):
     with reader.connection(artifact) as conn:
         require([r[0] for r in conn.execute('PRAGMA integrity_check')] == ['ok'], 'DATABASE_INTEGRITY_FAILED')
         reader._schema(conn, manifest)
@@ -135,7 +135,7 @@ def _content(reader, artifact, bridge, manifest, previous, omitted, scratch):
         with reader.connection(comparison) as old:
             reader._extension(old, conn, manifest)
         import projection_routing
-        indexed = projection_routing.build(conn, reader)
+        indexed = materialize(conn, reader) if materialize else projection_routing.build(conn, reader)
         profiles = {}
         for did, profile in indexed.items():
             reader.check()
@@ -145,26 +145,34 @@ def _content(reader, artifact, bridge, manifest, previous, omitted, scratch):
 
 def accept_disposable(store_root, publication_root, bridge_root, archive_root, *, enable_epoch_v2=False,
                       now=None, timeout=180, fault=lambda boundary: None):
-    """Accept only within an existing private disposable store.
+    if enable_epoch_v2 is not True:
+        raise SnapshotError('EPOCH_V2_DISABLED')
+    return accept_with_store(DisposableEpochStore(store_root, fault), publication_root,
+                            bridge_root, archive_root, now=now, timeout=timeout)
+
+
+def accept_with_store(store, publication_root, bridge_root, archive_root, *, now=None, timeout=180,
+                      max_bytes=4*1024**3, max_memory=512*1024**2, check_cancel=lambda: None,
+                      materialize=None, preflight=None, max_age=3600):
+    """Accept only within an existing private, explicitly supplied store.
 
     All roots are explicit operator configuration. No root or authority comes
     from a remote locator. No receipt argument is accepted from callers. The
     live bridge/archive session is created and consumed within this call.
     """
-    if enable_epoch_v2 is not True:
-        raise SnapshotError('EPOCH_V2_DISABLED')
     roots = [Path(x) for x in (publication_root, bridge_root, archive_root)]
     require(all(p.is_absolute() and p.resolve() == p for p in roots), 'EPOCH_TRUST_ROOT')
-    store = DisposableEpochStore(store_root, fault)
     require(all(not store.root.is_relative_to(p) and not p.is_relative_to(store.root) for p in roots), 'EPOCH_TRUST_ROOT')
     with store.locked():
         before, state = store.recover()
-        previous = state['last_accepted_projection_v2']
+        previous = copy.deepcopy(state['last_accepted_projection_v2'])
+        previous.setdefault('size_bytes', previous['manifest']['size_bytes'])
         require(previous['contract_revision'] == 'A1', 'EPOCH_FIRST_TRANSITION_REQUIRED')
         with tempfile.TemporaryDirectory(prefix='.stage-', dir=store.root) as temporary:
             scratch = Path(temporary)
             held = evidence.HeldInputs(scratch, lambda: None)
-            reader = ProjectionReader(roots[0], Path(previous['cache_path']).parent, timeout=timeout, enable_epoch_v2=True)
+            reader = ProjectionReader(roots[0], Path(previous['cache_path']).parent, check_cancel, timeout=timeout,
+                                      max_bytes=max_bytes, max_memory=max_memory, enable_epoch_v2=True)
             reader.deadline = time.monotonic() + timeout
             reader.metadata = {'stage_seconds': {}}
             held.check = reader.check
@@ -179,7 +187,9 @@ def accept_disposable(store_root, publication_root, bridge_root, archive_root, *
                 raw = held.read(_path(roots[0], sidecar['locator']), sidecar['sha256'], sidecar['size_bytes'], v2.MAX_INPUT_BYTES)
                 transition = v2.validate_transition_bytes(raw, sidecar, anchor, 0, True)
                 v2.validate_v2_manifest(manifest, transition)
-                model = _metadata(reader, pointer, manifest, transition, previous, now or datetime.now(timezone.utc))
+                model = _metadata(reader, pointer, manifest, transition, previous, now or datetime.now(timezone.utc), max_age)
+                if preflight:
+                    preflight(reader, held, scratch, manifest, transition, roots[2])
                 desc = transition['bridge_predecessor']
                 try:
                     bp, bm = _publication(held, roots[1], scratch / 'bridge', desc)
@@ -214,7 +224,7 @@ def accept_disposable(store_root, publication_root, bridge_root, archive_root, *
                     # This routine checks the complete archive/source recovery,
                     # all compact commitments and classifications independently.
                     summary = evidence.reconstruct(transition, accepted_anchor=anchor, plan_path=plan_path,
-                        artifact_path=artifact, archive_root=local_archive, timeout=max(0.001, reader.deadline-time.monotonic()))
+                        artifact_path=artifact, archive_root=local_archive, timeout=max(0.001, reader.deadline-time.monotonic()), scratch_root=scratch, check_external=reader.check)
                     archive_receipt = archive.VerifiedEpochArchive(session, session.token, receipt,
                         copy.deepcopy(arch), am, plan['recovery_commitment_sha256'],
                         dict(summary.counts)['mandatory_proof_closure'])
@@ -223,11 +233,11 @@ def accept_disposable(store_root, publication_root, bridge_root, archive_root, *
                     reader.require_verified_epoch_bridge(session, receipt, sidecar['sha256'], anchor, desc, transition['bridge_binding_sha256'])
                     bridge_previous = dict(previous, manifest=bm, snapshot_id=bm['snapshot_id'],
                         database_content_id=bm['database_content_id'], published_at=bp['published_at'])
-                    model = _metadata(reader, pointer, manifest, transition, bridge_previous, now or datetime.now(timezone.utc))
+                    model = _metadata(reader, pointer, manifest, transition, bridge_previous, now or datetime.now(timezone.utc), max_age)
                     # Routing's derived cache also remains session-private.
                     reader.cache_dir = scratch
                     profiles = _content(reader, artifact, bridge, model, previous,
-                                        omitted_ids, scratch)
+                                        omitted_ids, scratch, materialize)
                     held.unchanged(); reader.check()
                     require(store.load()[0] == before, 'EPOCH_ACCEPTED_STATE_CHANGED')
                     accepted = { 'manifest': manifest, 'manifest_hash': pointer['manifest_sha256'],
