@@ -13,10 +13,10 @@ WHEN = '2026-09-22T00:00:00Z'
 FIRST = '2026-09-01T00:00:00Z'
 
 
-def qualify(pid, digest):
+def qualify(pid, digest, sender='sender'):
     ref = {'kind': 'PROJECTED_MESSAGE', 'source_id': 'scout-source', 'source_epoch': 'source-epoch', 'id': pid, 'sha256': digest}
     q = {'schema': 'router-durable-qualification/v1', 'source_ref': ref, 'scout_event_id': '1',
-         'evidence_id': None, 'subject_did': 'sender', 'claim': {'kind': 'CAPABILITY', 'id': 'software.debugging'},
+         'evidence_id': None, 'subject_did': sender, 'claim': {'kind': 'CAPABILITY', 'id': 'software.debugging'},
          'qualification_type': 'CAPABILITY_USE', 'qualification_outcome': 'LIMITED', 'qualified_at': FIRST,
          'policy_version': c.POLICY['version'], 'policy_sha256': c.POLICY_SHA,
          'classifier_version': c.POLICY['classifier_version'], 'qualification_policy_version': c.POLICY['qualification_policy_version'],
@@ -28,31 +28,32 @@ def qualify(pid, digest):
     return q
 
 
-def bundle(root, damage=None):
+def bundle(root, damage=None, *, publication=False, cumulative=False):
     root = Path(root); root.mkdir(parents=True, exist_ok=True)
     archive = root/'archive'; (archive/'members').mkdir(parents=True)
     bridge_path = archive/'members/bridge-projection.sqlite'; active_path = root/'active.sqlite'
     b=sqlite3.connect(bridge_path); b.row_factory=sqlite3.Row; b.executescript(SCHEMA_SQL)
     b.execute('INSERT INTO snapshot_meta VALUES (1,?,?,?,?)', (c.SCHEMA,'1',FIRST,c.POLICY_SHA))
+    sender='did:key:z6MkSynthetic' if publication else 'sender'
     record_list=[]; raw_list=[]; membership=[]
     reason_list=[['durable_qualification','permanent_or_pinned'], ['permanent_or_pinned'], ['tclk_or_work_lifecycle'], ['coverage_witness'], [], [], [], []]
     for n in range(8):
         text = 'synthetic evidence '+str(n)
         if n==2: text='tclk1 '+canonical({'type':'offer','id':'offer-test','expiresMs':1788220800000}).decode()
         seq=100 if n==3 else n+1
-        envelope={'text':text,'from':'sender','seq':seq}
+        envelope={'text':text,'from':sender,'seq':seq}
         rid=sha(canonical(['scout-source','room','1','1',envelope])); pid='sm1:'+rid; digest=sha(text.encode())
-        raw={'raw_record_id':rid,'source':'scout-source','room':'room','generation':'1','reported_generation':'1','seq':seq,'sender_did':'sender','signature':None,'nonce':None,'raw_text':text,'raw_text_sha256':digest,'raw_record_json':canonical(envelope).decode()}
+        raw={'raw_record_id':rid,'source':'scout-source','room':'room','generation':'1','reported_generation':'1','seq':seq,'sender_did':sender,'signature':None,'nonce':None,'raw_text':text,'raw_text_sha256':digest,'raw_record_json':canonical(envelope).decode()}
         raw_list.append(raw)
         rec={'projection_row_id':pid,'raw_record_id':rid,'raw_text_sha256':digest,'scout_event_id':str(n+1)}; record_list.append(rec)
-        b.execute('INSERT INTO messages (projection_row_id,room,generation,seq,sender,signed,text,message_hash,verification_status) VALUES (?,?,?,?,?,1,?,?,?)', (pid,'room','1',seq,'sender',text,digest,'VERIFIED_OFFLINE'))
+        b.execute('INSERT INTO messages (projection_row_id,room,generation,seq,sender,signed,text,message_hash,verification_status) VALUES (?,?,?,?,?,1,?,?,?)', (pid,'room','1',seq,sender,text,digest,'VERIFIED_OFFLINE'))
         b.execute('INSERT INTO source_provenance VALUES (?,?,?,?,?,?,?,?)', ('message',pid,'scout-source',rid,str(n+1),rid,None,c.canonical(c.ANNOTATIONS).decode()))
         cls=['CAPABILITY_SUPPORT','PINNED','TCLK_LIFECYCLE','CONTEXT'][n] if n<4 else 'CONTEXT'
         expiry=None if n<2 else '2026-11-30T00:00:00Z' if n==2 else '2026-10-01T00:00:00Z'
         pins=canonical([{'kind':'TASK','id':'task-a'}] if n==1 else []).decode()
         member=('message',pid,cls,FIRST,expiry,pins); membership.append(member)
         b.execute('INSERT INTO selection_membership VALUES (?,?,?,?,?,?)',member)
-    q=qualify(record_list[0]['projection_row_id'],record_list[0]['raw_text_sha256'])
+    q=qualify(record_list[0]['projection_row_id'],record_list[0]['raw_text_sha256'],sender)
     b.execute('INSERT INTO durable_qualifications VALUES (?,?)',(q['qualification_id'],canonical(q).decode()))
     witness=dict(b.execute('SELECT * FROM messages WHERE projection_row_id=?',(record_list[3]['projection_row_id'],)).fetchone())
     cov={'room':'room','generation':'1','max_ever_projected_seq':100,'witness_source_locator':record_list[3]['raw_record_id'],'witness_record_sha256':c.digest(witness)}
@@ -89,10 +90,23 @@ def bundle(root, damage=None):
         annotation=dict(c.ANNOTATIONS, evidence_links=[{'room':'room','generation':'1','seq':5,'evidence_id':None}])
         for db in (a,b): db.execute('UPDATE source_provenance SET annotations_json=? WHERE projection_row_id=?',(canonical(annotation).decode(),record_list[2]['projection_row_id']))
     a.commit(); a.close(); b.commit(); b.close()
+    bridge_manifest = publication_manifest(bridge_path, 1, FIRST) if publication else None
+    if publication:
+        publish(root/'bridge-publication', bridge_manifest, bridge_path)
     t=model(); t['created_at']=WHEN
-    desc={'publication_sequence':1,'content_id':1,'manifest_sha256':'a'*64,'artifact_sha256':sha(bridge_path.read_bytes()),'artifact_size':bridge_path.stat().st_size,'source_kind':'source-epoch','source_id':'scout-source','source_cut':8}
-    t['accepted_anchor']=dict(desc);t['bridge_predecessor']=dict(desc)
-    binding=commit('a1-bridge-binding',{'accepted_anchor':desc,'bridge_predecessor':desc});t['bridge_binding_sha256']=binding
+    desc={'publication_sequence':1,'content_id':1,'manifest_sha256':sha(canonical(bridge_manifest)) if publication else 'a'*64,'artifact_sha256':sha(bridge_path.read_bytes()),'artifact_size':bridge_path.stat().st_size,'source_kind':'source-epoch','source_id':'scout-source','source_cut':8}
+    anchor=dict(desc)
+    if cumulative:
+        import shutil
+        initial=root/'accepted.sqlite'; shutil.copyfile(bridge_path,initial)
+        with sqlite3.connect(initial) as initial_db:
+            initial_db.execute("UPDATE snapshot_meta SET database_content_id='0'")
+        initial_manifest=publication_manifest(initial,0,FIRST)
+        publish(root/'accepted-publication',initial_manifest,initial)
+        anchor.update(publication_sequence=0,content_id=0,manifest_sha256=sha(canonical(initial_manifest)),
+                      artifact_sha256=sha(initial.read_bytes()),artifact_size=initial.stat().st_size)
+    t['accepted_anchor']=dict(anchor);t['bridge_predecessor']=dict(desc)
+    binding=commit('a1-bridge-binding',{'accepted_anchor':anchor,'bridge_predecessor':desc});t['bridge_binding_sha256']=binding
     t['source_binding']={'source_id':'scout-source','epoch':'source-epoch','descriptor_sha256':commit('source-binding-descriptor',{'schema':'flop-scout-epoch-source-binding/v1','source_id':'scout-source','epoch':'source-epoch','bridge_binding_sha256':binding})}
     t['source_cut']={'source_id':'scout-source','epoch':'source-epoch','committed_event_id':8,'cut_evidence_sha256':commit('source-cut-evidence',{'schema':'flop-scout-epoch-source-cut-evidence/v1','source_binding':t['source_binding'],'committed_event_id':8,'bridge_binding_sha256':binding})}
     closure=sorted([dict(record_list[n],reasons=reason_list[n]) for n in range(4)],key=lambda r:r['raw_record_id'])
@@ -113,18 +127,18 @@ def bundle(root, damage=None):
         if damage=='recovered-hash' and n==4: row['raw_text_sha256']='0'*64
         s.execute('INSERT INTO raw_records VALUES ('+','.join('?' for _ in row)+')',tuple(row.values()))
         s.execute('INSERT INTO observed_event_witnesses VALUES (?,?,?)',(99 if damage=='recovered-event' and n==4 else n+1,raw['raw_record_id'],raw['raw_text_sha256']))
-        s.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(n+1,raw['room'],raw['seq'],raw['raw_text'],'sender'))
+        s.execute('INSERT INTO messages VALUES (?,?,?,?,?)',(n+1,raw['room'],raw['seq'],raw['raw_text'],sender))
         s.execute('INSERT INTO compatibility_links VALUES (?,?,?,?)',('messages',n+1,raw['raw_record_id'],raw['raw_text_sha256']))
     if damage=='source-duplicate':
         row=raw_list[0];s.execute('INSERT INTO raw_records VALUES ('+','.join('?' for _ in row)+')',tuple(row.values()))
     checkpoint={'source_id':'scout-source','source_epoch':'source-epoch','source_cut':8}
-    s.execute('INSERT INTO source_evidence_metadata VALUES ('+','.join('?' for _ in range(12))+')',(1,'flop-scout-epoch-source-evidence/v1','legacy-a1-recovery/1',source_ddl_commitment(s),canonical(desc).decode(),canonical(desc).decode(),canonical(checkpoint).decode(),binding,recovery_hash,8,8,8))
+    s.execute('INSERT INTO source_evidence_metadata VALUES ('+','.join('?' for _ in range(12))+')',(1,'flop-scout-epoch-source-evidence/v1','legacy-a1-recovery/1',source_ddl_commitment(s),canonical(anchor).decode(),canonical(desc).decode(),canonical(checkpoint).decode(),binding,recovery_hash,8,8,8))
     s.commit();s.close()
     roles={'bridge_projection_sqlite':('bridge-projection.sqlite',c.SCHEMA),'legacy_recovery_json':('legacy-recovery.json',recovery['schema']),'source_evidence_sqlite':('source-evidence.sqlite','flop-scout-epoch-source-evidence/v1')}
     members=[]
     for role,(name,schema) in sorted(roles.items()):
         raw=(archive/'members'/name).read_bytes();members.append({'role':role,'locator':'members/'+name,'schema':schema,'sha256':sha(raw),'size_bytes':len(raw)})
-    manifest={'schema':'flop-scout-epoch-archive/v1','archive_id':'ea2:test','accepted_anchor':desc,'bridge_predecessor':desc,'previous_bridge_binding_sha256':binding,'source_checkpoint':checkpoint,'legacy_recovery':{'schema':recovery['schema'],'commitment_sha256':recovery_hash,'validated_records':8,'closure_count':4},'retention':'IMMUTABLE_INDEFINITE_FIRST_TRANSITION','members':members}
+    manifest={'schema':'flop-scout-epoch-archive/v1','archive_id':'ea2:test','accepted_anchor':anchor,'bridge_predecessor':desc,'previous_bridge_binding_sha256':binding,'source_checkpoint':checkpoint,'legacy_recovery':{'schema':recovery['schema'],'commitment_sha256':recovery_hash,'validated_records':8,'closure_count':4},'retention':'IMMUTABLE_INDEFINITE_FIRST_TRANSITION','members':members}
     manifest['manifest_commitment_sha256']=sha(b'flop-scout/epoch-archive-manifest/v1\0'+canonical(manifest))
     raw=canonical(manifest);(archive/'manifest.json').write_bytes(raw)
     t['archive']={'schema':manifest['schema'],'archive_id':'ea2:test','artifact_sha256':sha(raw),'size_bytes':len(raw),'database_schema_version':'flop-scout-epoch-archive-manifest/v1','locator':'archive/manifest.json','previous_epoch_id':'source-epoch','previous_manifest_sha256':desc['manifest_sha256'],'previous_bridge_binding_sha256':binding,'preservation':'IMMUTABLE_RETAINED'}
@@ -148,3 +162,31 @@ def refresh(root,t,p):
     t['active_set_plan'].update(locator='plan.json',sha256=sha(raw),size_bytes=len(raw),plan_commitment_sha256=p['plan_commitment_sha256'])
     seal(t)
     return t,p,{'accepted_anchor':copy.deepcopy(t['accepted_anchor']),'plan_path':path.resolve(),'artifact_path':(Path(root)/'active.sqlite').resolve(),'archive_root':(Path(root)/'archive').resolve()}
+
+
+def publication_manifest(path, content_id, when):
+    with sqlite3.connect(path) as db:
+        db.row_factory=sqlite3.Row
+        digest=sha(Path(path).read_bytes())
+        return {'schema':'flop-scout-router-snapshot/v2','contract_revision':'A1',
+            'snapshot_id':str(content_id),'publication_kind':'CONTENT','database_content_id':str(content_id),
+            'database':f'router-projection-v2-{content_id}-{digest}.sqlite','sha256':digest,
+            'size_bytes':Path(path).stat().st_size,'database_schema_version':c.SCHEMA,
+            'selection_policy':c.POLICY,'selection_policy_sha256':c.POLICY_SHA,
+            'content_created_at':when,'selection_evaluated_at':when,'produced_at':when,
+            'source_checkpoint':{'source_id':'scout-source','epoch':'source-epoch','committed_event_id':'8'},
+            'next_expiry_at':db.execute('SELECT min(retain_until) FROM selection_membership').fetchone()[0],
+            'row_counts':{t:db.execute('SELECT count(*) FROM '+t).fetchone()[0] for t in c.TABLES},
+            'watermarks':[dict(r) for r in db.execute('SELECT * FROM watermarks ORDER BY room,generation')],
+            'coverage_history':[dict(r) for r in db.execute('SELECT * FROM coverage_history ORDER BY room,generation')]}
+
+
+def publish(root, manifest, artifact):
+    import shutil
+    root=Path(root); root.mkdir(parents=True,exist_ok=True)
+    raw=canonical(manifest); name=f"manifest-v2-{manifest['snapshot_id']}-{sha(raw)}.json"
+    (root/name).write_bytes(raw)
+    target=root/manifest['database']; target.parent.mkdir(parents=True,exist_ok=True)
+    if target.resolve()!=Path(artifact).resolve(): shutil.copyfile(artifact,target)
+    (root/'current.json').write_bytes(canonical({'schema':'flop-scout-router-current/v2',
+        'manifest':name,'manifest_sha256':sha(raw),'published_at':manifest['produced_at']}))
